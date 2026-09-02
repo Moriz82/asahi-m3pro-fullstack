@@ -1,0 +1,53 @@
+ARG BASE_IMAGE=debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_SNAPSHOT
+ARG RUST_VERSION
+ARG RUSTUP_VERSION
+ARG RUSTUP_INIT_SHA256
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV PATH=/root/.cargo/bin:${PATH}
+
+RUN test -n "${DEBIAN_SNAPSHOT}" \
+    && sed -i \
+        -e "s#URIs: http://deb.debian.org/debian-security#URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}#" \
+        -e "s#URIs: http://deb.debian.org/debian#URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}#" \
+        -e '/^Components: main$/a Check-Valid-Until: no' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        bc \
+        binutils-aarch64-linux-gnu \
+        bison \
+        build-essential \
+        ca-certificates \
+        curl \
+        device-tree-compiler \
+        file \
+        flex \
+        gcc-aarch64-linux-gnu \
+        git \
+        libc6-dev-arm64-cross \
+        libgnutls28-dev \
+        libssl-dev \
+        locales \
+        python3 \
+        python3-pyelftools \
+        python3-setuptools \
+        swig \
+    && rm -rf /var/lib/apt/lists/* \
+    && localedef -i en_US -c -f UTF-8 en_US.UTF-8 \
+    && curl --proto '=https' --tlsv1.2 -fsSL \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-unknown-linux-gnu/rustup-init" \
+        -o /tmp/rustup-init \
+    && printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" /tmp/rustup-init | sha256sum -c - \
+    && chmod 0755 /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+        --target aarch64-unknown-none-softfloat \
+    && rm -f /tmp/rustup-init
+
+LABEL org.opencontainers.image.title="M3 Pro Milestone 0 builder"
+WORKDIR /workspace
