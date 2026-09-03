@@ -21,13 +21,21 @@ update or rollback.
   with the selected desktop packages. Its signed development repository is a
   separate noncanonical artifact, not a replacement for either upstream trust
   check.
-- `out/isolated/m8-full-platform-candidate-20260903T120409Z` composes the two
-  byte-identical M0 kernel packages, five signed Arch Linux ARM desktop
-  packages, and 16 signed Asahi ALARM platform packages under the checked-in
-  23-package contract. It preserves 21 upstream detached signatures and hashes
-  the four lifecycle files without executing them. Its `SHA256SUMS` file
-  hashes to
-  `a46cc2bad33e261832ac8558f2439315ed9a5b5d9b575bf2ce7265bfeb962e56`.
+- `out/isolated/m8-full-platform-candidate-20260903T120409Z` is retained as
+  historical evidence, but it is bound to the pre-M5 M0 kernel package bytes
+  and is superseded by the refresh below.
+- At `2026-09-03T16:34:18Z`,
+  `out/isolated/m8-refresh-20260903T163418Z/full-platform-candidate` recomposed
+  the two byte-identical current M0 kernel packages, five signed Arch Linux ARM
+  desktop packages, and 16 signed Asahi ALARM platform packages under the
+  checked-in 23-package contract. The refreshed eight-package input changed
+  only the `linux-asahi` and `linux-asahi-headers` hashes and passed the package
+  closure verifier. The candidate preserves 21 upstream detached signatures,
+  catalogs four lifecycle files without executing them, and binds the current
+  M0 `SHA256SUMS` digest
+  `4e899e2c1aae170280931fa6d89c5184f018986de38d9d8c3ab8c5964f606aa2`.
+  Its `SHA256SUMS` file hashes to
+  `dbc1097b3a46a64c6d67090531f3a37f93e7141e107659d64e830deb98d3c73e`.
 
 These artifacts establish current package availability and provenance only.
 The full-platform candidate is not a generated or signed repository and is
