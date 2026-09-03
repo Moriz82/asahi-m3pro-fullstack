@@ -70,6 +70,25 @@ current eight-package static closure, not the full platform package set or a
 second set of rollback package versions. It therefore closes signing-tooling
 coverage only; it does not satisfy the Milestone 8 exit.
 
+`build-m8-signed-rollback-bundle.sh` reuses that primitive for two complete
+eight-package sets. It requires every current package version to be strictly
+newer than its rollback version according to Arch `vercmp`, signs and verifies
+both repositories with the same externally held key, and binds their checksum
+manifests in one atomically published bundle. Its outer manifest is explicitly
+unsigned and reports `transaction=not-executed`; trust still comes from the
+caller-supplied full fingerprint and the signatures inside each repository.
+`verify-m8-signed-rollback-bundle.sh` rechecks both repositories, their package
+sets, version direction, coverage equality, exact inventory, and nested
+checksums without the private key. The fixture-only negative suite is
+`tests/m8-signed-rollback-bundle-self-test.sh`.
+
+The bundle proves the signing and rollback-set tooling path only. It is not one
+combined pacman database, does not contain real prior-version artifacts yet,
+and does not execute an update or rollback. Those remain separate gaps from
+the existing static snapshot simulator and native Milestone 8 acceptance.
+The point-in-time authoritative-source check and the no-fabrication decision
+are recorded in `docs/milestones/08-package-availability-audit.md`.
+
 The closure follows the current target stack: Asahi ALARM provides its Apple
 GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering
 backend. The older `mesa-asahi-edge` and `wlroots` package requirements are not
