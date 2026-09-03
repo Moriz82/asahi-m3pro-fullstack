@@ -1,0 +1,15 @@
+# format=1
+# target=Mac15,6/J514s/T6030
+# source_tree_commit=d8082213fc5a3a64c8b9464a7d5c82d13b1ea115
+# Static source contract only. Matching these bytes is not hardware acceptance.
+
+5e64f77ab17d3ef031f892aaaddfef3e998cad916287357584cb3ecf9ed97f43  arch/arm64/boot/dts/apple/t6030-j514s.dts
+9c71287c3fb2378f59da415185b9a87431bfc62073e7fa0546e9c44cd9a70adb  arch/arm64/boot/dts/apple/t6030-pmgr.dtsi
+202e562dbb0b6f57618c1e68748165b277e7d97327bebaa48a66775445968b17  arch/arm64/boot/dts/apple/t6030.dtsi
+0decc98d3f6559eda79efc24bd4767eaf49631897aa36c5277eec870b2121149  arch/arm64/boot/dts/apple/t603x-j514-j516.dtsi
+f48a05cf9ae17cc1871211cfd7a634f75d3bcdc131c0d7e896a8c8a80451a845  drivers/iommu/apple-dart.c
+8e6109382cdf9ff9f57062e1f0c86cc854dd16e82bd1077fb6be91fc328debd3  drivers/perf/Kconfig
+18a963aab97d2cce8d87cb9b7100a62da57565bb1e9dfd17f7cfbaddc0e41481  drivers/perf/apple_m1_cpu_pmu.c
+606a9771e2dbe6bacf294b0f2e4a45e97e0454a3da5cb923a44c8ee5cb48c776  drivers/soc/apple/Kconfig
+434a77b80994fdcfdf48499c61fc6161fa4b66f4a62cc652e58eadda4421e346  drivers/soc/apple/Makefile
+41cd01fe2e158ac9cdbdc5680bc3c195e1d7d94f4f7d0722921141e9806c5449  drivers/soc/apple/sep.rs

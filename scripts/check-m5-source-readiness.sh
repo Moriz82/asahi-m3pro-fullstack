@@ -28,6 +28,10 @@ source_status=$(git -C "$source_dir" status --porcelain=v1 --untracked-files=all
     die 'cannot inspect M5 source status'
 readonly source_status
 [[ -z $source_status ]] || die 'M5 source tree is not clean'
+sparse_entries=$(git -C "$source_dir" ls-files -t | awk '$1 == "S" { count++ } END { print count + 0 }') ||
+    die 'cannot inspect M5 sparse-checkout state'
+readonly sparse_entries
+[[ $sparse_entries -eq 0 ]] || die 'M5 source worktree is sparse'
 
 "$project_root/scripts/verify-m2-source-contract.sh" \
     --source-dir "$source_dir" --m0-evidence "$evidence" >/dev/null

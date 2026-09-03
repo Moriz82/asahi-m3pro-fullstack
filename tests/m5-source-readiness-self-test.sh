@@ -71,14 +71,16 @@ git -C "$git_fixture" sparse-checkout init --no-cone
 } | LC_ALL=C sort -u > "$git_fixture/.git/info/sparse-checkout"
 git -C "$git_fixture" checkout --detach "$LINUX_SOURCE_TREE_COMMIT" >/dev/null 2>&1
 set +e
-clean_output=$("$checker" --source-dir "$git_fixture" --m0-evidence "$evidence")
-clean_result=$?
+sparse_output=$("$checker" --source-dir "$git_fixture" --m0-evidence "$evidence" 2>&1)
+sparse_result=$?
 set -e
-[[ $clean_result -eq 2 ]]
-printf '%s\n' "$clean_output" | grep -Fx 'gate=blocked-target-display-link-topology' >/dev/null
-printf '\n# uncontracted dirty source\n' >> "$git_fixture/Makefile"
-if "$checker" --source-dir "$git_fixture" --m0-evidence "$evidence" >/dev/null 2>&1; then
-    printf 'dirty uncontracted source bypassed the pinned M5 gate\n' >&2
-    exit 1
-fi
+[[ $sparse_result -eq 1 ]]
+printf '%s\n' "$sparse_output" | grep -Fx 'M5 source worktree is sparse' >/dev/null
+printf 'uncontracted dirty source\n' > "$git_fixture/uncontracted-dirty"
+set +e
+dirty_output=$("$checker" --source-dir "$git_fixture" --m0-evidence "$evidence" 2>&1)
+dirty_result=$?
+set -e
+[[ $dirty_result -eq 1 ]]
+printf '%s\n' "$dirty_output" | grep -Fx 'M5 source tree is not clean' >/dev/null
 printf 'M5-source-readiness-tests=passed\n'
