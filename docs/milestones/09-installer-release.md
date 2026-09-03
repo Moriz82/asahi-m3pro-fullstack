@@ -27,11 +27,18 @@ standard release-input layout: `identity.txt`, `release-inputs.tsv`, and
 handoffs under `handoffs/M0` through `handoffs/M8` and writes an
 anchor-bound `canonical-handoff-map.tsv`. Recovery-plan and state-simulation
 verification require that canonical format unconditionally and recheck the
-map, copied handoff checksums, and independent anchor, so a legacy or forged
-format-1 release cannot enter downstream planning or simulation. A deterministic
+target identity, the exact ordered M0-M8 release-input rows, all false readiness
+fields, the map, copied handoff checksums, and independent anchor. A legacy or
+forged format-1 release, rehashed false-readiness record, or target-substituted
+record cannot enter downstream planning or simulation. A deterministic
 test-only pause point lets the self-tests schedule source mutation after a
 copied file and prove that it does not change the accepted snapshot. The pause
 touches only the private stage and never executes caller-supplied code.
+
+Release, recovery-plan, and simulation builders publish only complete verified
+staging directories through the shared OS-level atomic no-replace primitive.
+An existing or concurrently claimed destination is preserved and the attempted
+publication fails closed.
 
 `simulate-m9-installer-state-machine.sh` consumes only a verified release-input
 set, a declarative recovery plan, and a TSV transition trace. It accepts only

@@ -11,6 +11,12 @@ anchor_tmp=$(mktemp -d "${TMPDIR:-/tmp}/m9-anchors.XXXXXX")
 trap 'rm -rf -- "$tmp" "$anchor_tmp"' EXIT
 expect_fail() { if "$@" >/dev/null 2>&1; then printf 'unexpected success: %s\n' "$*" >&2; exit 1; fi; }
 expect_fail_no_output() { local out=$1; shift; expect_fail "$@"; [[ ! -e "$out" && ! -L "$out" ]] || { printf 'failed command emitted output: %s\n' "$out" >&2; exit 1; }; }
+atomic_source="$tmp/atomic-source"; atomic_destination="$tmp/atomic-destination"
+mkdir -m 700 -- "$atomic_source" "$atomic_destination"
+printf 'source\n' > "$atomic_source/source.txt"; printf 'destination\n' > "$atomic_destination/sentinel.txt"
+expect_fail evidence_atomic_publish_directory "$atomic_source" "$atomic_destination"
+[[ $(cat "$atomic_source/source.txt") == source && $(cat "$atomic_destination/sentinel.txt") == destination ]] || { printf 'atomic no-replace collision changed source or destination\n' >&2; exit 1; }
+[[ $(find -P "$atomic_destination" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]') == 1 ]] || { printf 'atomic no-replace collision added destination members\n' >&2; exit 1; }
 input="$tmp/input"; cp -R -- "$project_root/tests/fixtures/m9/release-inputs" "$input"
 {
     printf 'milestone\tmanifest\tmanifest_sha256\thardware_acceptance\tnative_readiness\tbackup_recovery\tdfu\tdedicated_hardware\n'
@@ -178,4 +184,13 @@ awk -F '\t' -v OFS='\t' -v h="$standalone_hash" '$1 == "M0" {$3=h} {print}' "$st
 map_hash=$(evidence_sha256 "$standalone_tampered/canonical-handoff-map.tsv"); sed -i.bak "s/^canonical_handoff_map_sha256=.*/canonical_handoff_map_sha256=$map_hash/" "$standalone_tampered/manifest.txt"; rm -f "$standalone_tampered/manifest.txt.bak"
 evidence_write_sums "$standalone_tampered" "$standalone_tampered/SHA256SUMS"
 expect_fail env SOFTWARE_OUTPUT_ROOT="$tmp/canonical-output" bash "$fixture_project/scripts/create-m9-recovery-plan.sh" --release-inputs "$standalone_tampered" --release-anchor "$fixture_anchor" --authority authorized-operator-review --operator moriz --out "$tmp/canonical-output/standalone-tampered-plan"
+readiness_tampered="$tmp/canonical-output/readiness-tampered"; cp -R -- "$canonical_release" "$readiness_tampered"
+awk -F '\t' 'BEGIN {OFS="\t"} $1 == "M0" {$5="true"} {print}' "$readiness_tampered/release-inputs.tsv" > "$readiness_tampered/release-inputs.new"; mv -- "$readiness_tampered/release-inputs.new" "$readiness_tampered/release-inputs.tsv"
+readiness_hash=$(evidence_sha256 "$readiness_tampered/release-inputs.tsv"); sed -i.bak "s/^release_input_set_sha256=.*/release_input_set_sha256=$readiness_hash/" "$readiness_tampered/manifest.txt"; rm -f -- "$readiness_tampered/manifest.txt.bak"
+evidence_write_sums "$readiness_tampered" "$readiness_tampered/SHA256SUMS"
+expect_fail_no_output "$tmp/canonical-output/readiness-tampered-plan" env SOFTWARE_OUTPUT_ROOT="$tmp/canonical-output" bash "$fixture_project/scripts/create-m9-recovery-plan.sh" --release-inputs "$readiness_tampered" --release-anchor "$fixture_anchor" --authority authorized-operator-review --operator moriz --out "$tmp/canonical-output/readiness-tampered-plan"
+identity_tampered="$tmp/canonical-output/identity-tampered"; cp -R -- "$canonical_release" "$identity_tampered"
+sed -i.bak 's/^model=Mac15,6$/model=Mac15,7/' "$identity_tampered/identity.txt"; rm -f -- "$identity_tampered/identity.txt.bak"
+evidence_write_sums "$identity_tampered" "$identity_tampered/SHA256SUMS"
+expect_fail_no_output "$tmp/canonical-output/identity-tampered-plan" env SOFTWARE_OUTPUT_ROOT="$tmp/canonical-output" bash "$fixture_project/scripts/create-m9-recovery-plan.sh" --release-inputs "$identity_tampered" --release-anchor "$fixture_anchor" --authority authorized-operator-review --operator moriz --out "$tmp/canonical-output/identity-tampered-plan"
 printf 'M9 tools self-tests passed\n'

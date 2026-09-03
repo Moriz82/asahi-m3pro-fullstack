@@ -19,6 +19,9 @@ for metadata in "$authority" "$operator"; do scan_unsafe_metadata "$metadata"; d
 [[ $authority =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]] || evidence_die 'authority must be a structured identifier without whitespace'
 [[ $operator =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$ ]] || evidence_die 'operator must be a structured identifier without whitespace'
 evidence_path_under "$out" "$output_root"
+[[ ! -e $out && ! -L $out ]] || evidence_die 'recovery-plan output already exists'
+out_parent=$(dirname -- "$out")
+evidence_abs_dir "$out_parent"
 [[ $release_anchor != "$release" && $release_anchor != "$release"/* && $release_anchor != "$out" && $release_anchor != "$out"/* && $release_anchor != "$output_root" && $release_anchor != "$output_root"/* ]] || evidence_die 'release anchor must be outside release and output trees'
 evidence_readonly "$release_anchor"
 [[ $(evidence_kv "$release_anchor" anchor_trust) == untrusted-declarative ]] || evidence_die 'release anchor is not a configured signed authority'
@@ -27,7 +30,10 @@ evidence_readonly "$release_anchor"
 [[ $(evidence_kv "$release/manifest.txt" external_anchor_sha256) == "$(evidence_sha256 "$release_anchor")" ]] || evidence_die 'release anchor changed or is not externally pinned'
 m9_validate_canonical_release_binding "$release" "$release_anchor"
 if printf '%s\n%s\n' "$authority" "$operator" | grep -Eiq 'password|secret|token|private[[:space:]]+key|-----BEGIN'; then evidence_die 'secrets are not accepted in recovery metadata'; fi
-evidence_new_dir "$out"
+stage=$(mktemp -d "$out_parent/.m9-recovery-plan.XXXXXX")
+chmod 700 "$stage"
+cleanup_recovery_plan() { [[ -z ${stage:-} || ! -e $stage ]] || rm -rf -- "$stage"; }
+trap cleanup_recovery_plan EXIT
 (umask 077; {
     printf 'format=1\nstatus=declarative\ntarget_model=Mac15,6\ntarget_board=J514s\ntarget_soc=T6030\n'
     printf 'release_inputs_sha256=%s\nrelease_anchor_sha256=%s\nhardware_acceptance=false\nactuation=false\n' "$(evidence_sha256 "$release/manifest.txt")" "$(evidence_sha256 "$release_anchor")"
@@ -35,11 +41,15 @@ evidence_new_dir "$out"
     printf 'native_action=false\noperator_authority=%s\noperator=%s\n' "$authority" "$operator"
     printf 'operator_steps=review-authority,preserve-macos,verify-backup,verify-dfu,stop-on-failure\n'
     printf 'scope=static-record-only\nraw_commands=none\n'
-} > "$out/plan.txt")
+} > "$stage/plan.txt")
 (umask 077; {
     printf 'mode=declarative-recovery-plan\n'
     printf 'The plan records operator gates and preserves macOS. It contains no secrets or raw commands.\n'
     printf 'An independent read-only recovery-plan anchor must pin plan.txt before simulation.\n'
-} > "$out/policy.txt")
-evidence_write_sums "$out" "$out/SHA256SUMS"
+} > "$stage/policy.txt")
+evidence_write_sums "$stage" "$stage/SHA256SUMS"
+evidence_verify_sums "$stage" "$stage/SHA256SUMS"
+evidence_atomic_publish_directory "$stage" "$out"
+[[ -d $out && ! -L $out && ! -e $stage && ! -L $stage ]] || evidence_die 'published recovery plan is not exactly the verified stage'
+stage=
 printf 'M9=recovery-plan-created plan=%s\n' "$out"

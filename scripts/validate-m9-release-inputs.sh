@@ -102,7 +102,8 @@ validate_canonical_handoffs() {
     } > "$publish/policy.txt")
     evidence_write_sums "$publish" "$publish/SHA256SUMS"
     evidence_verify_sums "$publish" "$publish/SHA256SUMS"
-    mv -- "$publish" "$out"
+    evidence_atomic_publish_directory "$publish" "$out"
+    [[ -d $out && ! -L $out && ! -e $publish && ! -L $publish ]] || evidence_die 'published release is not exactly the verified stage'
     publish=
     printf 'M9=canonical-handoffs-validated gate=blocked hardware_acceptance=false evidence=%s\n' "$out"
 }

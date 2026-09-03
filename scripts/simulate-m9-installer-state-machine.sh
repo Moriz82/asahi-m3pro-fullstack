@@ -73,6 +73,7 @@ cp -p -- "$transitions" "$stage/transitions.tsv"
 (umask 077; printf 'mode=static-state-simulation\nrecord_scope=blocked-planned-observed\n' > "$stage/policy.txt")
 evidence_write_sums "$stage" "$stage/SHA256SUMS"
 "$project_root/scripts/verify-m9-simulation.sh" --simulation "$stage" --release-sha256 "$(evidence_sha256 "$release/manifest.txt")" --plan-sha256 "$(evidence_sha256 "$plan/plan.txt")" >/dev/null
-mv -- "$stage" "$out"
+evidence_atomic_publish_directory "$stage" "$out"
+[[ -d $out && ! -L $out && ! -e $stage && ! -L $stage ]] || evidence_die 'published simulation is not exactly the verified stage'
 stage=
 printf 'M9=state-simulation-verified execution=blocked evidence=%s\n' "$out"
