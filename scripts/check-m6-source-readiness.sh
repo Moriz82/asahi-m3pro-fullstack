@@ -202,7 +202,9 @@ if grep -Fq "driver can't assure safety on this model, disabling speakers" "$mac
 fi
 
 readonly calibration_allowlist="$project_root/config/milestone6-speaker-calibrations.tsv"
+readonly graph_allowlist="$project_root/config/milestone6-speaker-dsp-graphs.tsv"
 [[ -f $calibration_allowlist && ! -L $calibration_allowlist ]] || die 'invalid M6 speaker calibration allowlist'
+[[ -f $graph_allowlist && ! -L $graph_allowlist ]] || die 'invalid M6 speaker DSP graph allowlist'
 awk -F '\t' '
     /^#/ { if (header) bad=1; next }
     !header { if ($0 != "board\tcalibration_sha256") bad=1; header=1; next }
@@ -210,9 +212,20 @@ awk -F '\t' '
     { if (++seen[$1 FS $2] != 1) bad=1 }
     END { if (!header) bad=1; exit bad }
 ' "$calibration_allowlist" || die 'invalid M6 speaker calibration allowlist rows'
+awk -F '\t' '
+    /^#/ { if (header) bad=1; next }
+    !header { if ($0 != "board\tgraph_id\tgraph_sha256") bad=1; header=1; next }
+    NF != 3 || $1 !~ /^[A-Za-z0-9._-]+$/ || $2 !~ /^[A-Za-z0-9._-]+$/ || length($3) != 64 || $3 !~ /^[0-9a-f]+$/ { bad=1; next }
+    { if (++seen[$1 FS $2 FS $3] != 1) bad=1 }
+    END { if (!header) bad=1; exit bad }
+' "$graph_allowlist" || die 'invalid M6 speaker DSP graph allowlist rows'
 j514_speaker_calibration_allowlisted=false
 if awk -F '\t' '$0 !~ /^#/ && $1 == "J514s" { count++ } END { exit !(count > 0) }' "$calibration_allowlist"; then
     j514_speaker_calibration_allowlisted=true
+fi
+j514_speaker_dsp_graph_allowlisted=false
+if awk -F '\t' '$0 !~ /^#/ && $1 == "J514s" && $2 == "graph-j514" { count++ } END { exit !(count > 0) }' "$graph_allowlist"; then
+    j514_speaker_dsp_graph_allowlisted=true
 fi
 
 printf 'M6-source-readiness=checked-static-only\n'
@@ -233,6 +246,7 @@ printf 'target_headphone_topology=%s\n' "$target_headphone_topology"
 printf 'target_speaker_topology=%s\n' "$target_speaker_topology"
 printf 'generic_speaker_kernel_guard=%s\n' "$generic_speaker_kernel_guard"
 printf 'j514_speaker_calibration_allowlisted=%s\n' "$j514_speaker_calibration_allowlisted"
+printf 'j514_speaker_dsp_graph_allowlisted=%s\n' "$j514_speaker_dsp_graph_allowlisted"
 printf 'speakersafetyd_runtime_evidence=false\n'
 printf 'native_runtime_evidence=false\n'
 printf 'hardware_acceptance=false\n'
@@ -241,10 +255,11 @@ if [[ $target_camera_topology == true && $target_h264_decode_source == true && \
     $target_av1_decode_source == true && $target_video_encode_source == true && \
     $target_prores_source == true && $target_microphone_topology == true && \
     $target_headphone_topology == true && $target_speaker_topology == true && \
-    $generic_speaker_kernel_guard == true && $j514_speaker_calibration_allowlisted == true ]]; then
+    $generic_speaker_kernel_guard == true && $j514_speaker_calibration_allowlisted == true && \
+    $j514_speaker_dsp_graph_allowlisted == true ]]; then
     printf 'm6_source_ready=true\n'
     exit 0
 fi
 printf 'm6_source_ready=false\n'
-printf 'gate=blocked-video-encode-prores-and-speaker-safety\n'
+printf 'gate=blocked-video-encode-prores-and-speaker-runtime\n'
 exit 2

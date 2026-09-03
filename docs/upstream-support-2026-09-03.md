@@ -110,3 +110,24 @@ The release-facing source pins remain deliberate:
 These checks prevent duplicate implementation and prevent an attractive but
 volatile topic aggregate from silently becoming the canonical source. They do
 not establish runtime hardware support.
+
+## Targeted subsystem refresh at 2026-09-03T16:56Z
+
+The signature-verified Asahi ALARM snapshot contains
+[`speakersafetyd 2.0.1`](https://github.com/AsahiLinux/speakersafetyd/commit/63a92658a4daec170c6472e38162374206e593fb)
+with a resolved `usr/share/speakersafetyd/apple/j514.conf` profile and
+[`asahi-audio 4.1`](https://github.com/AsahiLinux/asahi-audio/commit/687d8cd0f6dc4b12fc0d9c3aebe360656de2882e)
+with `graph-j514.json` and `mic-j514.json`. The speaker profile is the official
+J514 alias of the J314 six-speaker calibration. The repository now allowlists
+the exact packaged calibration and DSP graph hashes, but still requires
+daemon, loaded-graph, amplifier-temperature, negative-test, and native runtime
+proof before any speaker support claim or actuation.
+
+The same focused official-source scan found a public
+[T6030 ISP candidate](https://github.com/AsahiLinux/linux/commit/3b784fe) and
+narrow [SEP firmware-boot work](https://github.com/AsahiLinux/linux/commit/55098df5a483f6941281a20c41447cc87e093e76)
+used to unlock microphone secure-disable. It did not find qualifying
+J514/T6030 enablement for DCP, AGX, video encode, ProRes, Touch ID services,
+ANE, or the T6030 PMU. Those WIP/TBA gates remain unchanged; Binary Ninja or
+IDA work is not justified while the gap is public-source availability and
+native validation rather than an authorized binary-only interface.

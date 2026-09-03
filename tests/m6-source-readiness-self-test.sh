@@ -35,12 +35,13 @@ for line in \
     'target_headphone_topology=true' \
     'target_speaker_topology=true' \
     'generic_speaker_kernel_guard=true' \
-    'j514_speaker_calibration_allowlisted=false' \
+    'j514_speaker_calibration_allowlisted=true' \
+    'j514_speaker_dsp_graph_allowlisted=true' \
     'speakersafetyd_runtime_evidence=false' \
     'native_runtime_evidence=false' \
     'hardware_acceptance=false' \
     'm6_source_ready=false' \
-    'gate=blocked-video-encode-prores-and-speaker-safety'; do
+    'gate=blocked-video-encode-prores-and-speaker-runtime'; do
     printf '%s\n' "$output" | grep -Fx "$line" >/dev/null
 done
 

@@ -22,8 +22,10 @@ Internal speakers are never tested by the collector. They remain
 hash anchored to the repository-reviewed `config/milestone6-speaker-calibrations.tsv`,
 active `speakersafetyd`, approved DSP graph ID/hash, amplifier thermal
 telemetry and limit, and a blocked negative safety result. The production
-allowlist is intentionally empty until a reviewed calibration is added. A
-supported speaker row without every proof is rejected.
+allowlists pin the signature-verified `speakersafetyd 2.0.1` J514 calibration
+and `asahi-audio 4.1` `graph-j514` bytes. Those hashes authorize validation,
+not speaker actuation: a supported speaker row without every runtime proof is
+rejected.
 
 ## Pinned source readiness
 
@@ -39,11 +41,12 @@ microphone, CS42L84 headphone-jack, and six-amplifier speaker topology, with
 the expected ADMAC, MCA, macaudio, and codec modules built. These are static
 source candidates only, not proof that any path works on this Mac.
 
-The same exact tree has no Apple video-encoder or ProRes driver path. The
-reviewed J514 speaker-calibration allowlist is empty, and no static check can
-provide speakersafetyd, DSP, amplifier-thermal, or native runtime evidence.
-The source gate therefore exits 2 with granular positive and negative fields;
-internal speakers remain unactuated and M6 hardware acceptance remains false.
+The same exact tree has no Apple video-encoder or ProRes driver path. Official
+J514 speaker calibration and DSP graph hashes are now reviewed and allowlisted,
+but a static check cannot prove the daemon and graph are active or provide
+amplifier-thermal and native runtime evidence. The source gate therefore exits
+2 with granular positive and negative fields; internal speakers remain
+unactuated and M6 hardware acceptance remains false.
 
 ## Uniform software gate and handoff
 

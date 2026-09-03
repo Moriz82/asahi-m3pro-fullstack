@@ -1,0 +1,8 @@
+# Repository-reviewed J514 DSP graph allowlist. A hash permits validation only;
+# it does not prove that the graph was loaded or that speaker safety is active.
+# asahi_audio_version=4.1
+# asahi_audio_source_commit=687d8cd0f6dc4b12fc0d9c3aebe360656de2882e
+# asahi_audio_package_sha256=973916504f8a3125e99cb5ae21f69f78a410f1b6aafe3308400862d28edf3723
+# signed_snapshot_sha256=9d6598154323eff8571bc7f85a937ea784063e2e7b67d3a75548e4204b59d9d5
+board	graph_id	graph_sha256
+J514s	graph-j514	ec57f27220fde06c7c96d25404042a1ea54e59aac1293cd3a8ec8142d1e77228

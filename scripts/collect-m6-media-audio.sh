@@ -4,6 +4,21 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P); source "
 [[ $# -eq 5 && $1 == --dry-run && $2 == --input-dir && $4 == --out ]] || { printf 'usage: %s --dry-run --input-dir ABS --out ABS\n' "$0" >&2; exit 64; }
 input=$3; out=$5; evidence_abs_dir "$input"
 calibration_allowlist="$project_root/config/milestone6-speaker-calibrations.tsv"; evidence_abs_regular "$calibration_allowlist"
+graph_allowlist="$project_root/config/milestone6-speaker-dsp-graphs.tsv"; evidence_abs_regular "$graph_allowlist"
+awk -F '\t' '
+    /^#/ { if (header) bad=1; next }
+    !header { if ($0 != "board\tcalibration_sha256") bad=1; header=1; next }
+    NF != 2 || $1 !~ /^[A-Za-z0-9._-]+$/ || $2 !~ /^[0-9a-f]{64}$/ { bad=1; next }
+    { if (++seen[$1 FS $2] != 1) bad=1 }
+    END { if (!header) bad=1; exit bad }
+' "$calibration_allowlist" || evidence_die 'invalid speaker calibration allowlist'
+awk -F '\t' '
+    /^#/ { if (header) bad=1; next }
+    !header { if ($0 != "board\tgraph_id\tgraph_sha256") bad=1; header=1; next }
+    NF != 3 || $1 !~ /^[A-Za-z0-9._-]+$/ || $2 !~ /^[A-Za-z0-9._-]+$/ || $3 !~ /^[0-9a-f]{64}$/ { bad=1; next }
+    { if (++seen[$1 FS $2 FS $3] != 1) bad=1 }
+    END { if (!header) bad=1; exit bad }
+' "$graph_allowlist" || evidence_die 'invalid speaker DSP graph allowlist'
 for file in identity.txt kernel.log camera.tsv audio.tsv codecs.tsv speaker-safety.tsv; do evidence_abs_regular "$input/$file"; done
 evidence_validate_identity "$input/identity.txt"; evidence_require_clean_log "$input/kernel.log"
 check_fields() { local file=$1; shift; local h c; IFS=$'\t' read -r -a h < "$file" || evidence_die "missing TSV header: $file"; for c in "$@"; do printf '%s\n' "${h[@]}" | grep -Fx -- "$c" >/dev/null || evidence_die "missing $c in $file"; done; evidence_validate_tsv "$file" "$*" 1; }
@@ -31,8 +46,8 @@ speaker_status=$(awk -F '\t' '$1=="status" {print $2}' "$input/speaker-safety.ts
     awk -F '\t' '$1=="calibration_board" && $2=="J514s" {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'speaker calibration board is not J514s'
     speaker_hash=$(awk -F '\t' '$1=="calibration_sha256" {print $2}' "$input/speaker-safety.tsv"); [[ $speaker_hash =~ ^[[:xdigit:]]{64}$ ]] || evidence_die 'exact speaker calibration hash required'
     awk -F '\t' '$1=="speakersafetyd_active" && $2=="true" {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'speakersafetyd active proof missing'
-    awk -F '\t' '$1=="dsp_graph_id" && $2!="" {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'approved DSP graph ID missing'
-    awk -F '\t' '$1=="dsp_graph_sha256" && $2 ~ /^[[:xdigit:]]{64}$/ {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'approved DSP graph hash missing'
+    graph_id=$(awk -F '\t' '$1=="dsp_graph_id" {print $2}' "$input/speaker-safety.tsv"); [[ $graph_id =~ ^[A-Za-z0-9._-]+$ ]] || evidence_die 'approved DSP graph ID missing'
+    graph_hash=$(awk -F '\t' '$1=="dsp_graph_sha256" {print $2}' "$input/speaker-safety.tsv"); [[ $graph_hash =~ ^[[:xdigit:]]{64}$ ]] || evidence_die 'approved DSP graph hash missing'
     awk -F '\t' '$1=="amplifier_thermal_telemetry" && $2 ~ /^device=[^;]+;temperature_c=[0-9]+([.][0-9]+)?$/ {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'amplifier thermal telemetry missing'
     awk -F '\t' '$1=="amplifier_thermal_limit" && $2 ~ /^max_c=[0-9]+([.][0-9]+)?$/ {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'amplifier thermal limit missing'
     awk -F '\t' '
@@ -41,10 +56,11 @@ speaker_status=$(awk -F '\t' '$1=="status" {print $2}' "$input/speaker-safety.ts
         END {if (temp !~ /^[0-9]+([.][0-9]+)?$/ || limit !~ /^[0-9]+([.][0-9]+)?$/) exit 1; exit !(temp <= limit)}
     ' "$input/speaker-safety.tsv" || evidence_die 'amplifier temperature exceeds safety limit'
     awk -F '\t' -v h="$speaker_hash" '$1=="J514s" && $2==h {f=1} END {exit !f}' "$calibration_allowlist" || evidence_die 'speaker calibration is not in the reviewed J514s allowlist'
+    awk -F '\t' -v i="$graph_id" -v h="$graph_hash" '$1=="J514s" && $2==i && $3==h {f=1} END {exit !f}' "$graph_allowlist" || evidence_die 'speaker DSP graph is not in the reviewed J514s allowlist'
     awk -F '\t' '$1=="negative_safety_result" && $2=="blocked" {f=1} END {exit !f}' "$input/speaker-safety.tsv" || evidence_die 'negative speaker safety result is not blocked'
 }
 mkdir -p -m 700 -- "$MILESTONE_EVIDENCE_ROOT"; evidence_abs_dir "$MILESTONE_EVIDENCE_ROOT"; evidence_path_under "$out" "$MILESTONE_EVIDENCE_ROOT"; evidence_new_dir "$out"; mkdir -m 700 -- "$out/inputs"
 for file in identity.txt kernel.log camera.tsv audio.tsv codecs.tsv speaker-safety.tsv; do cp -p -- "$input/$file" "$out/inputs/$file"; done
-(umask 077; printf 'milestone=M6\nmodel=Mac15,6\nboard=J514s\nsoc=T6030\ncollection_status=software-plan-only\nhardware_acceptance=false\ninput_count=6\n' > "$out/manifest.txt")
+(umask 077; printf 'milestone=M6\nmodel=Mac15,6\nboard=J514s\nsoc=T6030\ncollection_status=software-plan-only\nhardware_acceptance=false\ninput_count=6\nspeaker_calibration_allowlist_sha256=%s\nspeaker_dsp_graph_allowlist_sha256=%s\n' "$(evidence_sha256 "$calibration_allowlist")" "$(evidence_sha256 "$graph_allowlist")" > "$out/manifest.txt")
 (umask 077; printf 'mode=software-plan-only\nThis bundle packages supplied media evidence only.\nNo camera, microphone, speaker, headphone, mixer, codec, or hardware command is performed.\nInternal speakers are not actuated by this tool.\n' > "$out/collection-plan.txt")
 evidence_write_sums "$out" "$out/SHA256SUMS"; printf 'bundle=%s\n' "$out"

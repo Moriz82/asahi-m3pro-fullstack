@@ -1,2 +1,9 @@
-# Repository-reviewed production allowlist. Empty means internal speakers remain disabled.
+# Repository-reviewed production allowlist. A hash permits validation only;
+# speakers remain disabled until every runtime safety proof also passes.
+# speakersafetyd_version=2.0.1
+# speakersafetyd_source_commit=63a92658a4daec170c6472e38162374206e593fb
+# speakersafetyd_source_path=conf/apple/j314.conf
+# speakersafetyd_package_sha256=e42da42d442072ec182f3740747dbae9bdd34468bd8645a0294322d11a98e3cb
+# signed_snapshot_sha256=9d6598154323eff8571bc7f85a937ea784063e2e7b67d3a75548e4204b59d9d5
 board	calibration_sha256
+J514s	95de31393a1c1742aa694d014f724a0ae869650bbde77144d407b49337480b9a
