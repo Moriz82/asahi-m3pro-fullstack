@@ -8,14 +8,21 @@ source "$project_root/scripts/lib/evidence.sh"
 default_snapshot="$project_root/config/milestone8-upstream-signed-snapshot.env"
 default_required="$project_root/config/milestone8-upstream-required-packages.txt"
 
-[[ $# -eq 2 && $1 == --input-dir ]] || {
-    printf 'usage: %s --input-dir ABS\n' "$0" >&2
+[[ $# -eq 2 || $# -eq 4 ]] || {
+    printf 'usage: %s --input-dir ABS [--packages-dir ABS]\n' "$0" >&2
     exit 64
 }
+[[ $1 == --input-dir ]] || { printf 'first option must be --input-dir\n' >&2; exit 64; }
 input=$2
+packages_dir=
+if [[ $# -eq 4 ]]; then
+    [[ $3 == --packages-dir ]] || { printf 'second option must be --packages-dir\n' >&2; exit 64; }
+    packages_dir=$4
+fi
 snapshot=${M8_SIGNED_SNAPSHOT:-$default_snapshot}
 required=${M8_SIGNED_REQUIRED_PACKAGES:-$default_required}
 evidence_abs_dir "$input"
+[[ -z $packages_dir ]] || evidence_abs_dir "$packages_dir"
 evidence_abs_regular "$snapshot"
 evidence_abs_regular "$required"
 command -v bsdtar >/dev/null || evidence_die 'bsdtar is required'
@@ -113,7 +120,14 @@ while IFS= read -r package; do
     [[ $architecture == aarch64 || $architecture == any ]] || evidence_die "wrong repository architecture: $package"
     [[ $hash =~ ^[0-9a-f]{64}$ ]] || evidence_die "invalid repository package hash: $package"
     [[ $artifact =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.pkg\.tar\.(xz|zst)$ ]] || evidence_die "unsafe repository artifact: $package"
+    if [[ -n $packages_dir ]]; then
+        evidence_abs_regular "$packages_dir/$artifact"
+        evidence_abs_regular "$packages_dir/$artifact.sig"
+        evidence_hash_file "$packages_dir/$artifact" "$hash"
+        verify_signature "$packages_dir/$artifact.sig" "$packages_dir/$artifact"
+    fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$package" "$version" "$architecture" "$hash" "$artifact" >>"$tmp/packages.tsv"
 done <"$required"
 
-printf 'M8=upstream-signed-snapshot-verified packages=%s signer=%s hardware_acceptance=false\n' "$(wc -l <"$required" | tr -d '[:space:]')" "$fingerprint"
+[[ -n $packages_dir ]] && artifacts=verified || artifacts=metadata-only
+printf 'M8=upstream-signed-snapshot-verified packages=%s artifacts=%s signer=%s hardware_acceptance=false\n' "$(wc -l <"$required" | tr -d '[:space:]')" "$artifacts" "$fingerprint"

@@ -56,7 +56,7 @@ race_publish() {
 }
 signed_fixture="$project_root/tests/fixtures/m8/signed-snapshot"
 M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
-    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input" >/dev/null
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input" --packages-dir "$signed_fixture/input" >/dev/null
 signed_tamper="$tmp/signed-tamper"; cp -R -- "$signed_fixture/input" "$signed_tamper"; printf 'tamper\n' >>"$signed_tamper/test.db.tar.gz"
 expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
     "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_tamper"
@@ -71,6 +71,13 @@ wrong_signature_hash=$(evidence_sha256 "$wrong_signature/test.db.tar.gz.sig")
 awk -F= -v hash="$wrong_signature_hash" '$1 == "repository_signature_sha256" {$2=hash} {print}' OFS== "$signed_fixture/snapshot.env" >"$wrong_signature_snapshot"
 expect_fail env M8_SIGNED_SNAPSHOT="$wrong_signature_snapshot" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
     "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$wrong_signature"
+signed_package_tamper="$tmp/signed-package-tamper"; cp -R -- "$signed_fixture/input" "$signed_package_tamper"; printf 'tamper\n' >>"$signed_package_tamper/m1n1-1.0-1-aarch64.pkg.tar.xz"
+expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input" --packages-dir "$signed_package_tamper"
+signed_package_bad_signature="$tmp/signed-package-bad-signature"; cp -R -- "$signed_fixture/input" "$signed_package_bad_signature"
+cp -p -- "$signed_package_bad_signature/test.db.tar.gz.sig" "$signed_package_bad_signature/m1n1-1.0-1-aarch64.pkg.tar.xz.sig"
+expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input" --packages-dir "$signed_package_bad_signature"
 missing_signed_package="$tmp/missing-signed-package.txt"; printf 'missing-platform-package\n' >"$missing_signed_package"
 expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$missing_signed_package" \
     "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input"

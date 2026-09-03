@@ -24,6 +24,9 @@ and checks that signed metadata contains the required Apple-platform package
 families. This proves repository provenance and availability only. It does not
 make the local preview signed, prove package installation, or prove J514s
 hardware support.
+With `--packages-dir`, it additionally checks each required package hash from
+the signed database and verifies the package's detached signature. Omitting
+that option is explicitly reported as `artifacts=metadata-only`.
 
 The closure follows the current target stack: Asahi ALARM provides its Apple
 GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering

@@ -1,0 +1,10 @@
+pkgname = m1n1
+pkgbase = m1n1
+pkgver = 1.0-1
+pkgdesc = M8 signed snapshot package fixture
+url = https://example.invalid/m8-fixture
+builddate = 0
+packager = M8 fixture
+size = 1
+arch = aarch64
+license = MIT
