@@ -47,6 +47,10 @@ Thunderbolt, webcam, microphones, and near-feature-parity DCP work. Those
 reports identify code to consume, but the feature matrix remains the release
 readiness authority: development success does not promote a WIP or TBA item.
 
+The pinned downstream AVD source statically enumerates AV1 on the T8122
+fallback selected by the T6030 node. That is a source candidate, not a runtime
+support claim, and does not override the feature matrix's current AV1 caveat.
+
 An independent source cross-check found the same boundary. Mainline
 `t6030-j514s.dts` supplies the machine compatibility and a loader-populated
 simple framebuffer, while the shared J514/J516 description enables only the

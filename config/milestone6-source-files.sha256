@@ -1,0 +1,25 @@
+# format=1
+# target=Mac15,6/J514s/T6030
+# source_tree_commit=d8082213fc5a3a64c8b9464a7d5c82d13b1ea115
+# Static source contract only. Matching these bytes is not hardware acceptance.
+
+507c8d49cc2c69ab5f42eabdf6d863aa3683c5aeef2a6f0848c2352432c5ebbe  arch/arm64/boot/dts/apple/isp-common.dtsi
+1a11b4b3ca42282a0e7f489401e20c82932a6051532e0c1bea7dffc4c23d54df  arch/arm64/boot/dts/apple/isp-imx558-cfg0.dtsi
+5e64f77ab17d3ef031f892aaaddfef3e998cad916287357584cb3ecf9ed97f43  arch/arm64/boot/dts/apple/t6030-j514s.dts
+202e562dbb0b6f57618c1e68748165b277e7d97327bebaa48a66775445968b17  arch/arm64/boot/dts/apple/t6030.dtsi
+0decc98d3f6559eda79efc24bd4767eaf49631897aa36c5277eec870b2121149  arch/arm64/boot/dts/apple/t603x-j514-j516.dtsi
+5f4832f7da99e27cd4a70f104b192547ffe39123fadedc1c078e17bfdb980dee  drivers/dma/apple-admac.c
+160a8cd3fe4984bb37266261a5c877b08e53f406fa2623271a07c969acf74b26  drivers/media/platform/apple/avd/Kconfig
+0cc139bfd28826ab905062ec83499f7982dd29bd5ca6d15204edc1d5789b5243  drivers/media/platform/apple/avd/Makefile
+3f382e76603996ba922994499d9a2fbf8c05763650c5dc29732df3bb4e2e5f59  drivers/media/platform/apple/avd/avd-drv.c
+460ebdb8d42070f938c57261316eb33475d493a991060ce2d948a52dbf443ba0  drivers/media/platform/apple/avd/avd-v4l2.c
+ffc6a5751833ccf5d91b2cb592ea5deada9ae840096deae26bbe8ccfac81c145  drivers/media/platform/apple/isp/Kconfig
+9efe312299a2e294395e02a559ebe5729b2a39caedd1008fa06d5317c5584b31  drivers/media/platform/apple/isp/Makefile
+7ed91c7cdcca1e81020d414ab9aab1f9f9d90bb0d3f2348a98f513a6273e9adc  drivers/media/platform/apple/isp/isp-drv.c
+4ed6c4423440b95641256b405b917b5eeaeeb0bf0111ff43281562b4700b114d  sound/soc/apple/Kconfig
+1c6a295fbee056d082a9d87d55c1b07f70494e5f65535bd4598fad4da8a3f869  sound/soc/apple/Makefile
+4fc272f08808d33e3f3ef6b76c986c0716c7e68e2e6ce6f8ce0414e091d06c64  sound/soc/apple/aop_audio.rs
+4b4f6627be6e9d866f533cfaf98b6070385e70a7e2772078c19f51a8824e6e3b  sound/soc/apple/macaudio.c
+83131be9464a5a488959fa64b644da393c60561c945b56dcdda5f7f494ff7d90  sound/soc/apple/mca.c
+c6a54c3c9f495a59feedce9acf2d0ea87dc541093103e21709e20e691aec93fa  sound/soc/codecs/cs42l84.c
+0dcd89b952f2754f8a49a836ff1a2c3b416f267e99a5a718b4ed06ca5f328b71  sound/soc/codecs/tas2764.c

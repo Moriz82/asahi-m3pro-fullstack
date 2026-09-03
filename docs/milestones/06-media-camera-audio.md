@@ -25,6 +25,26 @@ telemetry and limit, and a blocked negative safety result. The production
 allowlist is intentionally empty until a reviewed calibration is added. A
 supported speaker row without every proof is rejected.
 
+## Pinned source readiness
+
+`scripts/check-m6-source-readiness.sh` binds its result to the exact clean
+Linux tree used by M0, the M2 source contract, a focused M6 file-hash contract,
+and the checksummed M0 kernel config/module inventory. It reuses the existing
+downstream Apple drivers; it does not reimplement media or audio support.
+
+The pinned tree contains an explicit T6030 ISP match and J514 IMX558 camera
+wiring. Its T6030 AVD node uses a driver-matched T8122-compatible decoder path,
+whose static formats include H.264, HEVC, VP9, and AV1. J514 also has AOP
+microphone, CS42L84 headphone-jack, and six-amplifier speaker topology, with
+the expected ADMAC, MCA, macaudio, and codec modules built. These are static
+source candidates only, not proof that any path works on this Mac.
+
+The same exact tree has no Apple video-encoder or ProRes driver path. The
+reviewed J514 speaker-calibration allowlist is empty, and no static check can
+provide speakersafetyd, DSP, amplifier-thermal, or native runtime evidence.
+The source gate therefore exits 2 with granular positive and negative fields;
+internal speakers remain unactuated and M6 hardware acceptance remains false.
+
 ## Uniform software gate and handoff
 
 The verifier reports `tooling_valid`, `evidence_valid`, and
