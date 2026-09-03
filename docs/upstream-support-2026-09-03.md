@@ -16,6 +16,8 @@ Primary evidence:
 - [kernel.org release data](https://www.kernel.org/releases.json)
 - [upstream initial T6030/J514s commit](https://github.com/torvalds/linux/commit/e81af013dbdd84c4e13f92c304eee555b1f9447a)
 - [Linux v7.3-rc1 J514s device tree](https://github.com/torvalds/linux/blob/v7.3-rc1/arch/arm64/boot/dts/apple/t6030-j514s.dts)
+- [Linux v7.3-rc1 T6030 SoC description](https://github.com/torvalds/linux/blob/v7.3-rc1/arch/arm64/boot/dts/apple/t6030.dtsi)
+- [Linux v7.3-rc1 shared J514/J516 description](https://github.com/torvalds/linux/blob/v7.3-rc1/arch/arm64/boot/dts/apple/t603x-j514-j516.dtsi)
 - [Asahi M3 feature matrix](https://asahilinux.org/docs/platform/feature-support/m3/)
 - [Asahi Linux 7.2 progress report](https://asahilinux.org/2026/08/progress-report-7-2/)
 
@@ -44,6 +46,22 @@ The August progress report describes development success for ACE3/SPMI, USB 3,
 Thunderbolt, webcam, microphones, and near-feature-parity DCP work. Those
 reports identify code to consume, but the feature matrix remains the release
 readiness authority: development success does not promote a WIP or TBA item.
+
+An independent source cross-check found the same boundary. Mainline
+`t6030-j514s.dts` supplies the machine compatibility and a loader-populated
+simple framebuffer, while the shared J514/J516 description enables only the
+serial port and keyboard-backlight PWM. The v7.3-rc1 target description has no
+NVMe, PCIe, USB, SPMI, SMC, MTP, ISP, or AVD nodes. By contrast, the pinned
+downstream T6030 description is 1,536 lines versus mainline's 524 and includes
+those platform blocks plus their J514 wiring. The downstream build is therefore
+not made redundant by 7.3.
+
+The only newly redundant work would be a local reimplementation of the minimal
+T6030/J514s device tree or its generic bindings; this repository has no such
+duplicate. The local schema-lint patch remains a downstream validation fix, not
+an M3-support implementation. If the project later rebases to mainline, that
+patch must be re-evaluated against mainline's different PCIe binding structure
+instead of carried automatically.
 
 ## Reuse map
 
