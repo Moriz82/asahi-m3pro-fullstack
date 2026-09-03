@@ -28,6 +28,13 @@ With `--packages-dir`, it additionally checks each required package hash from
 the signed database and verifies the package's detached signature. Omitting
 that option is explicitly reported as `artifacts=metadata-only`.
 
+Arch Linux ARM uses a different trust model: its official policy requires
+package signatures but intentionally leaves repository databases unsigned.
+`verify-m8-archlinuxarm-package-signatures.sh` therefore pins the published
+build-system fingerprint, verifies the keyring package and each required
+Hyprland-side package, and records the upstream database policy without
+inventing a nonexistent database signature.
+
 The closure follows the current target stack: Asahi ALARM provides its Apple
 GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering
 backend. The older `mesa-asahi-edge` and `wlroots` package requirements are not

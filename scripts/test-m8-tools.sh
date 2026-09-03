@@ -81,6 +81,64 @@ expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQU
 missing_signed_package="$tmp/missing-signed-package.txt"; printf 'missing-platform-package\n' >"$missing_signed_package"
 expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$missing_signed_package" \
     "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input"
+arch_signatures="$tmp/arch-signatures"; mkdir -p "$arch_signatures"
+cp -p -- "$signed_fixture/input/m1n1-1.0-1-aarch64.pkg.tar.xz.sig" "$arch_signatures/"
+env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_signatures" >/dev/null
+arch_wrong_signer="$tmp/arch-wrong-signer.env"
+awk -F= '$1 == "signer_fingerprint" {$2="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"} {print}' OFS== "$signed_fixture/arch-signing.env" >"$arch_wrong_signer"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$arch_wrong_signer" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_signatures"
+arch_tampered_package="$tmp/arch-tampered-package"; mkdir -p "$arch_tampered_package"
+cp -p -- "$signed_fixture/input/m1n1-1.0-1-aarch64.pkg.tar.xz" "$arch_tampered_package/"
+printf 'tamper\n' >>"$arch_tampered_package/m1n1-1.0-1-aarch64.pkg.tar.xz"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$arch_tampered_package" --signatures-dir "$arch_signatures"
+arch_bad_signature="$tmp/arch-bad-signature"; mkdir -p "$arch_bad_signature"
+cp -p -- "$signed_fixture/input/test.db.tar.gz.sig" "$arch_bad_signature/m1n1-1.0-1-aarch64.pkg.tar.xz.sig"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_bad_signature"
+cp -p -- "$signed_fixture/input/test.db.tar.gz.sig" "$arch_signatures/extra.sig"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_signatures"
+rm -f -- "$arch_signatures/extra.sig"
+ln -s m1n1-1.0-1-aarch64.pkg.tar.xz.sig "$arch_signatures/extra.sig"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$signed_fixture/arch-required-packages.txt" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_signatures"
+arch_empty_required="$tmp/arch-empty-required.txt"; : >"$arch_empty_required"
+expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$arch_empty_required" \
+    "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+    --input-dir "$signed_fixture/input" --package-manifest "$signed_fixture/package-manifest.tsv" \
+    --packages-dir "$signed_fixture/input" --signatures-dir "$arch_signatures"
+expect_arch_identity_fail() {
+    local case_name=$1 package=$2 version=$3 architecture=$4 case_root artifact hash
+    case_root="$tmp/$case_name"; mkdir -p "$case_root/packages" "$case_root/signatures"
+    artifact="$package-$version-$architecture.pkg.tar.xz"
+    cp -p -- "$signed_fixture/input/m1n1-1.0-1-aarch64.pkg.tar.xz" "$case_root/packages/$artifact"
+    cp -p -- "$signed_fixture/input/m1n1-1.0-1-aarch64.pkg.tar.xz.sig" "$case_root/signatures/$artifact.sig"
+    hash=$(evidence_sha256 "$case_root/packages/$artifact")
+    printf 'package\tversion\tarchitecture\tsha256\tartifact\n%s\t%s\t%s\t%s\t%s\n' "$package" "$version" "$architecture" "$hash" "$artifact" >"$case_root/packages.tsv"
+    printf '%s\n' "$package" >"$case_root/required.txt"
+    expect_fail env M8_ARCH_SIGNING_SNAPSHOT="$signed_fixture/arch-signing.env" M8_ARCH_SIGNING_REQUIRED_PACKAGES="$case_root/required.txt" \
+        "$project_root/scripts/verify-m8-archlinuxarm-package-signatures.sh" \
+        --input-dir "$signed_fixture/input" --package-manifest "$case_root/packages.tsv" \
+        --packages-dir "$case_root/packages" --signatures-dir "$case_root/signatures"
+}
+expect_arch_identity_fail arch-wrong-name hyprland 1.0-1 aarch64
+expect_arch_identity_fail arch-wrong-version m1n1 2.0-1 aarch64
+expect_arch_identity_fail arch-wrong-architecture m1n1 1.0-1 any
 fixture="$project_root/tests/fixtures/m8/package-input"
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$fixture" >/dev/null
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$project_root/tests/fixtures/m8/package-input-missing"

@@ -1,0 +1,5 @@
+aquamarine
+hyprland
+libinput
+wayland
+xdg-desktop-portal-hyprland
