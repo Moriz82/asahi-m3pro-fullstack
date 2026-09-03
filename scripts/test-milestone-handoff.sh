@@ -4,9 +4,13 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/config/milestones.env"
 source "$project_root/scripts/lib/evidence.sh"
 test_root=${TEST_OUTPUT_ROOT:-${TMPDIR:-/tmp}/asahi-handoff-tests}
-mkdir -p -m 700 "$test_root" "$MILESTONE_EVIDENCE_ROOT" "$MILESTONE_HANDOFF_ROOT"
+mkdir -p -m 700 "$test_root"
 tmp=$(mktemp -d "$test_root/handoff.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
+MILESTONE_EVIDENCE_ROOT="$tmp/evidence"
+MILESTONE_HANDOFF_ROOT="$tmp/handoffs"
+export MILESTONE_EVIDENCE_ROOT MILESTONE_HANDOFF_ROOT
+mkdir -m 700 "$MILESTONE_EVIDENCE_ROOT" "$MILESTONE_HANDOFF_ROOT"
 expect_fail() { if "$@" >/dev/null 2>&1; then printf 'unexpected success: %s\n' "$*" >&2; exit 1; fi; }
 input="$tmp/m2-input"; mkdir -m 700 "$input"
 printf 'model=Mac15,6\nboard=J514s\nsoc=T6030\n' > "$input/identity.txt"
