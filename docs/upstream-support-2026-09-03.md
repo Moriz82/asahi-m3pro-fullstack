@@ -19,6 +19,32 @@ Primary evidence:
 - [Asahi M3 feature matrix](https://asahilinux.org/docs/platform/feature-support/m3/)
 - [Asahi Linux 7.2 progress report](https://asahilinux.org/2026/08/progress-report-7-2/)
 
+## Exact scope of the 7.3 label
+
+At this checkpoint, `7.3` is mainline `7.3-rc1`; the latest stable kernel is
+7.2.3. The accepted upstream commit adds minimal T6030/J514s device trees with
+CPU cores, timer, AIC, power states, watchdog, UART, pin control, I2C, keyboard
+backlight PWM, and the boot framebuffer. A boot framebuffer is not DCP display
+support or GPU acceleration.
+
+The Asahi matrix uses `linux-asahi (7.3)` for the M3 Pro device tree, AICv3,
+UART, watchdog, I2C, GPIO, and keyboard backlight. In the matrix's terminology,
+that means the support is stable in the downstream `linux-asahi` tree and is
+expected upstream by the named release. It is not a statement that every M3 Pro
+feature is in mainline 7.3.
+
+Other blocks already marked `linux-asahi`, including NVMe, PCIe, CPU frequency
+and idle, suspend, DART, SMC, SPMI, RTC, keyboard, touchpad, battery, radios,
+audio, camera, and SD, should be reused from the downstream tree and validated
+on J514s rather than reimplemented. The same live matrix still marks DCP,
+USB2/3, DP Alt Mode, USB-PD, installer, display, brightness, and HDMI as WIP,
+while GPU, PMU, SEP, Touch ID, Neural Engine, video encode, and ProRes are TBA.
+
+The August progress report describes development success for ACE3/SPMI, USB 3,
+Thunderbolt, webcam, microphones, and near-feature-parity DCP work. Those
+reports identify code to consume, but the feature matrix remains the release
+readiness authority: development success does not promote a WIP or TBA item.
+
 ## Reuse map
 
 | Milestone | Current official status | Project action |
