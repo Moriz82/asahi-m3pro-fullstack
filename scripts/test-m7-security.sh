@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P); source "$project_root/config/milestones.env"; tmp=$(mktemp -d "${TMPDIR:-/tmp}/m7-test.XXXXXX"); trap 'rm -rf -- "$tmp"' EXIT
+MILESTONE_EVIDENCE_ROOT="$tmp/evidence"; export MILESTONE_EVIDENCE_ROOT; mkdir -m 700 "$MILESTONE_EVIDENCE_ROOT"
 expect_fail() { if "$@" >/dev/null 2>&1; then printf 'unexpected success: %s\n' "$*" >&2; exit 1; fi; }
 make_input() {
     local d=$1; mkdir -p "$d"; cp "$project_root/tests/fixtures/m7/valid/identity.txt" "$d/identity.txt"; cp "$project_root/tests/fixtures/kernel/clean.log" "$d/kernel.log"; printf 'key\tvalue\nsip\tenabled\nfilevault\tenabled\nboot_policy\tunchanged\nraw_biometric_export\tfalse\n' > "$d/macos-security.tsv"

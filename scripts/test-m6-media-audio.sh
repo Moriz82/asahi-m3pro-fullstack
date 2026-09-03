@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P); source "$project_root/config/milestones.env"; source "$project_root/scripts/lib/evidence.sh"; tmp=$(mktemp -d "${TMPDIR:-/tmp}/m6-test.XXXXXX"); trap 'rm -rf -- "$tmp"' EXIT
+MILESTONE_EVIDENCE_ROOT="$tmp/evidence"; export MILESTONE_EVIDENCE_ROOT; mkdir -m 700 "$MILESTONE_EVIDENCE_ROOT"
 expect_fail() { if "$@" >/dev/null 2>&1; then printf 'unexpected success: %s\n' "$*" >&2; exit 1; fi; }
 calibration_hash=$(awk -F '\t' '$1=="J514s" {print $2}' "$project_root/config/milestone6-speaker-calibrations.tsv")
 graph_id=$(awk -F '\t' '$1=="J514s" {print $2}' "$project_root/config/milestone6-speaker-dsp-graphs.tsv")

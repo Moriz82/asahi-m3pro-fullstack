@@ -4,6 +4,9 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/config/milestones.env"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/m4-test.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
+MILESTONE_EVIDENCE_ROOT="$tmp/evidence"
+export MILESTONE_EVIDENCE_ROOT
+mkdir -m 700 "$MILESTONE_EVIDENCE_ROOT"
 expect_fail() { if "$@" >/dev/null 2>&1; then printf 'unexpected success: %s\n' "$*" >&2; exit 1; fi; }
 make_input() {
     local dir=$1 renderer=$2 seconds=$3
