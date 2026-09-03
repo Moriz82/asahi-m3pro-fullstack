@@ -4,13 +4,9 @@ set -Eeuo pipefail
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 source "$project_root/scripts/lib/m8-coverage.sh"
-archive_tool=
-for candidate in bsdtar gtar tar; do
-    if command -v "$candidate" >/dev/null 2>&1; then archive_tool=$candidate; break; fi
-done
-[[ -n $archive_tool ]] || evidence_die 'bsdtar, gtar, or tar is required for package verification'
+command -v bsdtar >/dev/null 2>&1 || evidence_die 'bsdtar is required for package verification'
+archive_tool=bsdtar
 archive_list() { "$archive_tool" -tf "$1"; }
-archive_verbose() { "$archive_tool" -tvf "$1"; }
 archive_extract_member() { "$archive_tool" -xOf "$1" "$2" 2>/dev/null || "$archive_tool" -xOf "$1" "./$2"; }
 usage() { printf 'usage: %s (--input-dir|--repo) ABS [--required ABS] [--forbidden ABS]\n' "$0" >&2; exit 64; }
 root=; required="$project_root/config/milestone8-required-packages.txt"; forbidden="$project_root/config/milestone8-forbidden-vm-tokens.txt"; coverage_contract="$project_root/config/milestone8-platform-coverage.tsv"
@@ -61,6 +57,21 @@ scan_unsafe_actions() {
 scan_archive_paths() {
     local archive=$1 path normalized listing
     listing=$(archive_list "$archive") || { evidence_die "invalid compressed package archive: $archive"; return 1; }
+    if ! awk '
+        NR == FNR { if ($0 != "" && $0 !~ /^#/) forbidden[tolower($0)]=1; next }
+        {
+            path=tolower($0)
+            sub(/^\.\//, "", path)
+            count=split(path, component, "/")
+            for (i=1; i<=count; i++) if (component[i] in forbidden) bad=1
+            if (path ~ /^(usr\/)?(s?bin|libexec)\//) {
+                for (token in forbidden) if (index(component[count], token) == 1) bad=1
+            }
+        }
+        END { exit bad }
+    ' "$forbidden" <(printf '%s\n' "$listing"); then
+        evidence_die "forbidden token in archive path: $archive"
+    fi
     while IFS= read -r path; do
         normalized=${path#./}
         [[ -z $normalized ]] && normalized=.
@@ -68,24 +79,55 @@ scan_archive_paths() {
         case $normalized in
             .INSTALL|*/.INSTALL|usr/share/libalpm/hooks/*.hook|etc/pacman.d/hooks/*.hook) evidence_die "lifecycle hook in package archive: $archive:$normalized"; return 1;;
         esac
-        for token in "${forbidden_tokens[@]}"; do
-            if printf '%s\n' "$normalized" | grep -Fqi -- "$token"; then evidence_die "forbidden archive path in $archive"; return 1; fi
-        done
     done <<< "$listing"
 }
+scan_archive_types_and_links() {
+    local archive=$1
+    "$archive_tool" -cf - --format=mtree --no-xattrs "@$archive" | awk '
+        function safe_link(path, target, combined, count, i, depth, component, parts) {
+            if (path ~ /\\/ || target == "" || target ~ /^\// || target ~ /\\/) return 0
+            sub(/^\.\//, "", path)
+            combined = path
+            sub(/\/[^\/]*$/, "", combined)
+            if (combined == path) combined = target
+            else combined = combined "/" target
+            count = split(combined, parts, "/")
+            depth = 0
+            for (i = 1; i <= count; i++) {
+                component = parts[i]
+                if (component == "" || component == ".") continue
+                if (component == "..") {
+                    if (depth == 0) return 0
+                    depth--
+                } else depth++
+            }
+            return 1
+        }
+        NR == 1 { if ($0 != "#mtree") bad=1; next }
+        {
+            path=$1; type=""; link=""; type_count=0; link_count=0
+            for (i=2; i<=NF; i++) {
+                if ($i ~ /^type=/) { type=substr($i, 6); type_count++ }
+                if ($i ~ /^link=/) { link=substr($i, 6); link_count++ }
+            }
+            if (path ~ /\\/ || type_count != 1 || type !~ /^(file|dir|link)$/) bad=1
+            if (type == "link") {
+                if (link_count != 1 || !safe_link(path, link)) bad=1
+            } else if (link_count != 0) bad=1
+        }
+        END { exit bad }
+    '
+}
 verify_archive() {
-    local archive=$1 expected_package=$2 expected_version=$3 expected_arch=$4 list verbose pkginfo_path pkginfo value path
+    local archive=$1 expected_package=$2 expected_version=$3 expected_arch=$4 list pkginfo_path pkginfo value
     list=$(archive_list "$archive") || evidence_die "invalid compressed package archive: $archive"
     [[ -n $list ]] || evidence_die "empty package archive: $archive"
     scan_archive_paths "$archive"
-    verbose=$(archive_verbose "$archive") || evidence_die "cannot inspect package archive: $archive"
-    while IFS= read -r path; do
-        case $path in l*|h*|c*|b*|p*|s*) evidence_die "non-regular archive member: $archive:$path"; return 1;; esac
-    done <<< "$verbose"
+    scan_archive_types_and_links "$archive" || evidence_die "unsafe archive member or link: $archive"
     pkginfo_path=$(printf '%s\n' "$list" | awk 'substr($0,1,2)== "./" {$0=substr($0,3)} $0==".PKGINFO" {n++; p=$0} END {if(n != 1) exit 1; print p}') || evidence_die "archive must contain exactly one .PKGINFO: $archive"
     pkginfo=$(mktemp)
     archive_extract_member "$archive" "$pkginfo_path" > "$pkginfo" || { rm -f -- "$pkginfo"; evidence_die "cannot extract .PKGINFO: $archive"; }
-    scan_forbidden "$pkginfo"; scan_unsafe_actions "$pkginfo"
+    scan_forbidden "$pkginfo"
     grep -Eiq '(^|[[:space:]])install[[:space:]]*=' "$pkginfo" && { rm -f -- "$pkginfo"; evidence_die "install action in .PKGINFO: $archive"; }
     for key in pkgname pkgver arch; do
         value=$(awk -F ' = ' -v wanted="$key" '$1 == wanted {n++; v=$2} END {if(n != 1) exit 1; print v}' "$pkginfo") || { rm -f -- "$pkginfo"; evidence_die "invalid $key in .PKGINFO: $archive"; }

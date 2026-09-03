@@ -132,6 +132,9 @@ its verifier; `hardware_acceptance=false` means native support is not claimed.
 The aggregate static check emits `aggregate_tooling_valid=true` only after all
 tooling, self-test, and blocked-gate checks pass. M9 is terminal and accepts
 only verified canonical M0–M8 handoffs plus an external, read-only hash anchor.
+Keep those nine inputs in a dedicated clean handoff root with exact directory
+names `M0` through `M8`; timestamped archives and test outputs must stay in a
+different root because M9 rejects every unexpected top-level member.
 
 For a reproducible host-independent check, build `build/Containerfile.static`
 and run `scripts/verify-all-software-tooling.sh --static` with the checkout

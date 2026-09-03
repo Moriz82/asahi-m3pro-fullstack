@@ -105,6 +105,8 @@ make_bad_archive() {
     printf 'pkgname = %s\npkgver = %s\npkgbase = linux-asahi\narch = %s\n' "$pkgname" "$pkgver" "$arch" > "$work_root/root/.PKGINFO"
     if [[ $dependency == install-action ]]; then
         printf 'install = /usr/bin/unsafe\n' >> "$work_root/root/.PKGINFO"
+    elif [[ $dependency == safe-build-dependency ]]; then
+        printf 'makedepend = openssl\n' >> "$work_root/root/.PKGINFO"
     elif [[ -n $dependency ]]; then
         printf 'depend = %s\n' "$dependency" >> "$work_root/root/.PKGINFO"
     fi
@@ -112,6 +114,10 @@ make_bad_archive() {
         .INSTALL) printf 'lifecycle\n' > "$work_root/root/.INSTALL";;
         libalpm-hook) mkdir -p "$work_root/root/usr/share/libalpm/hooks"; printf 'lifecycle\n' > "$work_root/root/usr/share/libalpm/hooks/lifecycle.hook";;
         pacman-hook) mkdir -p "$work_root/root/etc/pacman.d/hooks"; printf 'lifecycle\n' > "$work_root/root/etc/pacman.d/hooks/lifecycle.hook";;
+        safe-link) printf 'safe target\n' > "$work_root/root/usr/share/target"; ln -s target "$work_root/root/usr/share/m8";;
+        escaping-link) ln -s ../../../../outside "$work_root/root/usr/share/m8";;
+        safe-header-token) mkdir -p "$work_root/root/usr/include"; printf 'generic header\n' > "$work_root/root/usr/include/qemu_fw_cfg.h";;
+        qemu-executable) mkdir -p "$work_root/root/usr/bin"; printf 'vm executable\n' > "$work_root/root/usr/bin/qemu-system-aarch64";;
         *) mkdir -p "$work_root/root/usr/share/$path_token"; printf 'bad archive\n' > "$work_root/root/usr/share/$path_token/file";;
     esac
     if command -v gtar >/dev/null 2>&1; then
@@ -139,10 +145,16 @@ expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive mismatch-version linux-asahi wrong-version aarch64 '' safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive mismatch-arch linux-asahi 7.1.9.asahi1-1 x86_64 '' safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive compressed-forbidden linux-asahi 7.1.9.asahi1-1 aarch64 qemu qemu)"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive path-only-qemu linux-asahi 7.1.9.asahi1-1 aarch64 '' qemu)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive install-metadata linux-asahi 7.1.9.asahi1-1 aarch64 install-action safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive install-file linux-asahi 7.1.9.asahi1-1 aarch64 '' .INSTALL)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive libalpm-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' libalpm-hook)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive pacman-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' pacman-hook)"
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-link linux-asahi 7.1.9.asahi1-1 aarch64 '' safe-link)" >/dev/null
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-build-dependency linux-asahi 7.1.9.asahi1-1 aarch64 safe-build-dependency safe)" >/dev/null
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-header-token linux-asahi 7.1.9.asahi1-1 aarch64 '' safe-header-token)" >/dev/null
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive escaping-link linux-asahi 7.1.9.asahi1-1 aarch64 '' escaping-link)"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive qemu-executable linux-asahi 7.1.9.asahi1-1 aarch64 '' qemu-executable)"
 invalid_builder_out="$tmp/libalpm-builder-hook-repo"
 expect_fail "$project_root/scripts/build-m8-unsigned-repo.sh" --input-dir "$(make_bad_archive libalpm-builder-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' libalpm-hook)" --out "$invalid_builder_out"
 assert_absent "$invalid_builder_out"

@@ -37,9 +37,17 @@ claim.
 
 `verify-m8-package-closure.sh` fails closed on missing or extra packages,
 wrong architecture, missing or mismatched artifacts, duplicate metadata,
-forbidden VM/software-rendering tokens, symlinks, unsafe paths, package
-installation metadata, `.INSTALL` files, and pacman lifecycle hook paths under
-`usr/share/libalpm/hooks/` or `etc/pacman.d/hooks/`. `build-m8-unsigned-repo.sh`
+forbidden VM/software-rendering tokens, unsafe or escaping symlinks, unsafe
+paths, non-file device members, package installation metadata, `.INSTALL`
+files, and pacman lifecycle hook paths under `usr/share/libalpm/hooks/` or
+`etc/pacman.d/hooks/`. Safe relative symlinks are accepted because real Arch
+packages, including the pinned M0 kernel headers, require them. Archive-member
+validation requires `bsdtar`. Forbidden archive paths are matched as complete
+path components, so generic kernel interfaces such as `qemu_fw_cfg.h` and
+`virtio.h` do not falsely identify a package as VM-specific. Executable paths
+also reject forbidden-name prefixes such as `qemu-system-aarch64`. Package
+names, artifact names, metadata, and dependencies retain case-insensitive
+substring checks. `build-m8-unsigned-repo.sh`
 copies verified inputs and the byte-identical coverage contract into a new
 output directory and writes unsigned manifest/checksum metadata only.
 
