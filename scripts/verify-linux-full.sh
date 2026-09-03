@@ -93,8 +93,8 @@ grep -Fx "known_target_diagnostic_fingerprints=${LINUX_TARGET_DT_DIAGNOSTICS_FIN
 grep -Fx 'classification=known target diagnostics are unresolved upstream/downstream debt and are not hardware-support evidence' "$evidence/schema-exceptions.txt" >/dev/null
 grep -Fx 'source_clean=true' "$evidence/manifest.txt" >/dev/null
 test ! -s "$evidence/source-status.txt"
-test "$(shasum -a 256 "$evidence/config-input" | awk '{print $1}')" = "$LINUX_CONFIG_FRAGMENT_SHA256"
-test "$(shasum -a 256 "$evidence/config" | awk '{print $1}')" = "$(awk '{print $1}' "$evidence/config-merged.sha256")"
+test "$(sha256sum "$evidence/config-input" | awk '{print $1}')" = "$LINUX_CONFIG_FRAGMENT_SHA256"
+test "$(sha256sum "$evidence/config" | awk '{print $1}')" = "$(awk '{print $1}' "$evidence/config-merged.sha256")"
 for setting in \
     CONFIG_ARM64=y CONFIG_ARCH_APPLE=y CONFIG_ARM64_16K_PAGES=y \
     '# CONFIG_ARM64_4K_PAGES is not set' CONFIG_MODULES=y CONFIG_SUSPEND=y CONFIG_PM=y \
@@ -102,8 +102,12 @@ for setting in \
     CONFIG_DRM_ASAHI=m CONFIG_DRM_APPLE=m CONFIG_PCIE_APPLE=m CONFIG_IOMMU_SUPPORT=y \
     CONFIG_IOMMU_IO_PGTABLE_LPAE=y CONFIG_APPLE_DART=m CONFIG_APPLE_AIC=y CONFIG_APPLE_MAILBOX=y \
     CONFIG_APPLE_PMGR_PWRSTATE=y CONFIG_APPLE_PMGR_MISC=y CONFIG_APPLE_RTKIT=y \
+    CONFIG_MFD_MACSMC=m CONFIG_GPIO_MACSMC=m CONFIG_RTC_DRV_MACSMC=m \
+    CONFIG_SENSORS_MACSMC_HWMON=m CONFIG_I2C_APPLE=m CONFIG_SPI_APPLE=m \
+    CONFIG_SPMI=y CONFIG_SPMI_APPLE=m CONFIG_PINCTRL_APPLE_GPIO=m CONFIG_APPLE_WATCHDOG=m \
     CONFIG_APPLE_RTKIT_HELPER=m CONFIG_USB_DWC3_APPLE=m CONFIG_SND_SOC_APPLE_MACAUDIO=m \
     CONFIG_CPU_IDLE=y CONFIG_ARM_APPLE_CPUIDLE=y CONFIG_CPU_FREQ=y CONFIG_ARM_APPLE_SOC_CPUFREQ=m \
+    CONFIG_PM_SLEEP=y CONFIG_HWMON=y CONFIG_THERMAL=y CONFIG_THERMAL_HWMON=y \
     'CONFIG_LOCALVERSION=".asahi1"' '# CONFIG_LOCALVERSION_AUTO is not set'; do
     grep -Fx "$setting" "$evidence/config" >/dev/null
 done
@@ -132,7 +136,7 @@ extract_target_log() {
 }
 cmp <(extract_target_log) "$evidence/target-dtbs-check.log"
 test "$(wc -l < "$evidence/target-dtbs-check.log" | tr -d ' ')" -eq "$LINUX_TARGET_DT_DIAGNOSTICS_LINES"
-test "$(shasum -a 256 "$evidence/target-dtbs-check.log" | awk '{print $1}')" = "$LINUX_TARGET_DT_DIAGNOSTICS_SHA256"
+test "$(sha256sum "$evidence/target-dtbs-check.log" | awk '{print $1}')" = "$LINUX_TARGET_DT_DIAGNOSTICS_SHA256"
 test "$(wc -l < "$evidence/target-warning-inventory.txt" | tr -d ' ')" -eq "$LINUX_TARGET_DT_DIAGNOSTICS_FINGERPRINTS"
 awk -v target="arch/arm64/boot/dts/$LINUX_DTB:" '
     /Warning \(/ || index($0, target) == 1 { print }

@@ -1,0 +1,32 @@
+# format=1
+# target=Mac15,6/J514s/T6030
+# source_tree_commit=3502c22e0aa9698a18793a5db1f2d2f23c74b77b
+# Static source contract only. Matching these bytes is not hardware acceptance.
+
+# Target and board wiring
+5e64f77ab17d3ef031f892aaaddfef3e998cad916287357584cb3ecf9ed97f43  arch/arm64/boot/dts/apple/t6030-j514s.dts
+202e562dbb0b6f57618c1e68748165b277e7d97327bebaa48a66775445968b17  arch/arm64/boot/dts/apple/t6030.dtsi
+9c71287c3fb2378f59da415185b9a87431bfc62073e7fa0546e9c44cd9a70adb  arch/arm64/boot/dts/apple/t6030-pmgr.dtsi
+0decc98d3f6559eda79efc24bd4767eaf49631897aa36c5277eec870b2121149  arch/arm64/boot/dts/apple/t603x-j514-j516.dtsi
+a4a26dd2abe3412221761fcbe05958599a7ff07b2fd980ab8a739a175966cc5e  arch/arm64/boot/dts/apple/spi1-nvram.dtsi
+240f138526ff84717ee8a65b47f749b2d855ddd472b6c16e9b5a93dcd8bea601  arch/arm64/boot/dts/apple/hwmon-common.dtsi
+ebc824c95d4195f424d1918a1ac96026f7214b77dcafa1581daf3304b38d3368  arch/arm64/boot/dts/apple/hwmon-fan-dual.dtsi
+f6d27404317ca2eb7e277149da2cfa3ea5fc3e95bbca34cd32b705088780ece4  arch/arm64/boot/dts/apple/hwmon-laptop.dtsi
+
+# Core, peripheral, storage, frequency, idle, and telemetry drivers
+d52ff497371f81b94af730792c9ea9fb2bf24d99cf7df6e8985351dd331c2287  drivers/irqchip/irq-apple-aic.c
+f48a05cf9ae17cc1871211cfd7a634f75d3bcdc131c0d7e896a8c8a80451a845  drivers/iommu/apple-dart.c
+a09148952eb78c516f6484889a013b86b757552cf6ce5dde54c96f794d8acfdf  drivers/pmdomain/apple/pmgr-pwrstate.c
+7e871588d94d8860febe0b75c4115bdbf137c3b11bf8c4b8734087a21cff8a41  drivers/mfd/macsmc.c
+79b51ff34131c17a91d946bc8032af7c2156b60ccd1c4569609d023840d668ee  drivers/gpio/gpio-macsmc.c
+ce03efc8a74e51a629a52d5b348b8fdcb6d39891b441a3e53cd5be62d6358432  drivers/rtc/rtc-macsmc.c
+8272ac871f4f21e22e4cf90440b90e011f0327dbc5a0202361554d7a9dec0012  drivers/hwmon/macsmc-hwmon.c
+39c368ba1d90b872dadbac150716d5bf2b42cd034eee39cbe278eb91c148edf6  drivers/i2c/busses/i2c-pasemi-platform.c
+3f0c3791ec557f420b3264b4f2169bbc994b0f6109601c95c2b127d619974f76  drivers/spi/spi-apple.c
+097a627f5acdb366b1637e56555802898b36a1e2ac34faa391695d16127bad98  drivers/spmi/spmi-apple-controller.c
+9e387713c4443d0af50fde108ae46d35e2f57adc2738c005b3de5bf8d4c7533c  drivers/pinctrl/pinctrl-apple-gpio.c
+937beceb5183621e9241c3a9c1b7c63877b0d5f2da383759390593fd420a22ec  drivers/watchdog/apple_wdt.c
+95f9a0fe75f62eb1532648f1d47b7c84a77030e5d451bf64b2424f6f605942ab  drivers/nvme/host/apple.c
+0f0023baa3fce32a593e286c82bae8325da2f68cac4ec34bce6768db25e34bb6  drivers/pci/controller/pcie-apple.c
+e4efe79b653dc07c18a2bacc607fe69f8144ead11bf10cd4ef9407396ca808d2  drivers/cpufreq/apple-soc-cpufreq.c
+117650f48d17e2db2f8246ce2cc73995b4881587572756b75d330df95da87ded  drivers/cpuidle/cpuidle-apple.c
