@@ -16,6 +16,15 @@ artifacts. They do not download, install, sign, publish, boot, alter the host,
 or assert that Arch packages are currently available. The preview repository
 is deterministic evidence and is not a pacman repository for direct use.
 
+`verify-m8-upstream-signed-snapshot.sh` separately validates a hash-pinned
+Asahi ALARM repository database and its keyring package offline. It derives a
+binary verification key from the packaged armored key, verifies both detached
+signatures with `gpgv`, requires the externally published full fingerprint,
+and checks that signed metadata contains the required Apple-platform package
+families. This proves repository provenance and availability only. It does not
+make the local preview signed, prove package installation, or prove J514s
+hardware support.
+
 The closure follows the current target stack: Asahi ALARM provides its Apple
 GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering
 backend. The older `mesa-asahi-edge` and `wlroots` package requirements are not

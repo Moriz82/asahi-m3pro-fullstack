@@ -1,0 +1,17 @@
+alsa-ucm-conf-asahi
+asahi-alarm-keyring
+asahi-audio
+asahi-configs
+asahi-fwextract
+asahi-meta
+asahi-nvram
+asahi-scripts
+asahi-wifisync
+bankstown
+linux-asahi
+m1n1
+mesa
+speakersafetyd
+tiny-dfr
+triforce-lv2
+uboot-asahi

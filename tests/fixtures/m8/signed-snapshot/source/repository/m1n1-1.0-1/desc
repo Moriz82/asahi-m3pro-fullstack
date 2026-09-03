@@ -1,0 +1,23 @@
+%FILENAME%
+m1n1-1.0-1-aarch64.pkg.tar.xz
+
+%NAME%
+m1n1
+
+%VERSION%
+1.0-1
+
+%DESC%
+M8 signed snapshot test fixture
+
+%CSIZE%
+1
+
+%ISIZE%
+1
+
+%SHA256SUM%
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+%ARCH%
+aarch64

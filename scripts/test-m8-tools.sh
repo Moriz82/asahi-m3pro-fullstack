@@ -54,6 +54,26 @@ race_publish() {
     assert_empty_dir "$race_out"
     for race_stage in "$tmp/.${race_name}.stage."*; do assert_absent "$race_stage"; done
 }
+signed_fixture="$project_root/tests/fixtures/m8/signed-snapshot"
+M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input" >/dev/null
+signed_tamper="$tmp/signed-tamper"; cp -R -- "$signed_fixture/input" "$signed_tamper"; printf 'tamper\n' >>"$signed_tamper/test.db.tar.gz"
+expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_tamper"
+wrong_signer="$tmp/wrong-signer.env"
+awk -F= '$1 == "signer_fingerprint" {$2="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"} {print}' OFS== "$signed_fixture/snapshot.env" >"$wrong_signer"
+expect_fail env M8_SIGNED_SNAPSHOT="$wrong_signer" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input"
+wrong_signature="$tmp/wrong-signature"; cp -R -- "$signed_fixture/input" "$wrong_signature"
+cp -p -- "$wrong_signature/test-keyring.pkg.tar.xz.sig" "$wrong_signature/test.db.tar.gz.sig"
+wrong_signature_snapshot="$tmp/wrong-signature.env"
+wrong_signature_hash=$(evidence_sha256 "$wrong_signature/test.db.tar.gz.sig")
+awk -F= -v hash="$wrong_signature_hash" '$1 == "repository_signature_sha256" {$2=hash} {print}' OFS== "$signed_fixture/snapshot.env" >"$wrong_signature_snapshot"
+expect_fail env M8_SIGNED_SNAPSHOT="$wrong_signature_snapshot" M8_SIGNED_REQUIRED_PACKAGES="$signed_fixture/required-packages.txt" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$wrong_signature"
+missing_signed_package="$tmp/missing-signed-package.txt"; printf 'missing-platform-package\n' >"$missing_signed_package"
+expect_fail env M8_SIGNED_SNAPSHOT="$signed_fixture/snapshot.env" M8_SIGNED_REQUIRED_PACKAGES="$missing_signed_package" \
+    "$project_root/scripts/verify-m8-upstream-signed-snapshot.sh" --input-dir "$signed_fixture/input"
 fixture="$project_root/tests/fixtures/m8/package-input"
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$fixture" >/dev/null
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$project_root/tests/fixtures/m8/package-input-missing"
