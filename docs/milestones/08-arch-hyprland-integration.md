@@ -3,9 +3,9 @@
 Milestone 8 defines a deterministic, native-oriented package closure for the
 Mac15,6/J514s/T6030 target. The required package list is in
 `config/milestone8-required-packages.txt`; each supplied artifact is described
-by `packages.tsv`; every artifact must be a real zstd-compressed Arch package
-archive with exactly one `.PKGINFO` containing matching `pkgname`, `pkgver`,
-and `arch` fields:
+by `packages.tsv`; every artifact must be a real zstd- or xz-compressed Arch
+package archive with a matching suffix and exactly one `.PKGINFO` containing
+matching `pkgname`, `pkgver`, and `arch` fields:
 
 ```
 package<TAB>version<TAB>architecture<TAB>sha256<TAB>artifact
@@ -47,17 +47,23 @@ wrong architecture, missing or mismatched artifacts, duplicate metadata,
 forbidden VM/software-rendering tokens, unsafe or escaping symlinks, unsafe
 paths, non-file device members, package installation metadata, `.INSTALL`
 files, and pacman lifecycle hook paths under `usr/share/libalpm/hooks/` or
-`etc/pacman.d/hooks/`. Safe relative symlinks are accepted because real Arch
-packages, including the pinned M0 kernel headers, require them. Archive-member
+`etc/pacman.d/hooks/`. Lexically contained relative symlinks and rooted absolute
+symlinks that resolve to members of the same package are accepted because real
+Arch packages require both; traversal through `..`, unresolved absolute targets,
+and forbidden target paths remain rejected. Archive-member
 validation requires `bsdtar`. Forbidden archive paths are matched as complete
 path components, so generic kernel interfaces such as `qemu_fw_cfg.h` and
 `virtio.h`, and unused Mesa modules such as `swrast_dri.so` or
 `virtio_gpu_dri.so`, do not falsely identify a package as VM-specific.
 Executable paths still reject forbidden-name prefixes such as
-`qemu-system-aarch64`. Package names, artifact names, metadata, and dependencies
-retain case-insensitive substring checks. Package contents establish closure,
-not the active GPU path; the native M4 renderer gate must independently prove
-an Apple/AGX renderer and reject software rendering. `build-m8-unsigned-repo.sh`
+`qemu-system-aarch64`. Package names, artifact names, identity/description,
+runtime dependencies, provided capabilities, and repository metadata retain
+case-insensitive substring checks. Inert build dependencies and negative
+`replaces`/`conflict` metadata are not treated as installed capabilities; real
+Asahi Mesa uses those fields to displace `vulkan-swrast`. Package contents
+establish closure, not the active GPU path; the native M4 renderer gate must
+independently prove an Apple/AGX renderer and reject software rendering.
+`build-m8-unsigned-repo.sh`
 copies verified inputs and the byte-identical coverage contract into a new
 output directory and writes unsigned manifest/checksum metadata only.
 

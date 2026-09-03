@@ -58,6 +58,21 @@ fixture="$project_root/tests/fixtures/m8/package-input"
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$fixture" >/dev/null
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$project_root/tests/fixtures/m8/package-input-missing"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$project_root/tests/fixtures/m8/package-input-forbidden"
+xz_input="$tmp/xz-input"; cp -R -- "$fixture" "$xz_input"
+zst_artifact=aquamarine-0.14.0-2-aarch64.pkg.tar.zst
+xz_artifact=aquamarine-0.14.0-2-aarch64.pkg.tar.xz
+xz_root="$tmp/xz-root"; mkdir -p "$xz_root"
+bsdtar -xf "$xz_input/$zst_artifact" -C "$xz_root"
+bsdtar -cJf "$xz_input/$xz_artifact" -C "$xz_root" .
+rm -f -- "$xz_input/$zst_artifact"
+xz_hash=$(evidence_sha256 "$xz_input/$xz_artifact")
+awk -F '\t' -v p=aquamarine -v h="$xz_hash" -v a="$xz_artifact" 'BEGIN {OFS="\t"} $1 == p {$4=h; $5=a} {print}' "$xz_input/packages.tsv" > "$xz_input/packages.tsv.new"; mv -- "$xz_input/packages.tsv.new" "$xz_input/packages.tsv"
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$xz_input" >/dev/null
+mislabeled_input="$tmp/mislabeled-input"; cp -R -- "$fixture" "$mislabeled_input"
+mv -- "$mislabeled_input/$zst_artifact" "$mislabeled_input/$xz_artifact"
+mislabeled_hash=$(evidence_sha256 "$mislabeled_input/$xz_artifact")
+awk -F '\t' -v p=aquamarine -v h="$mislabeled_hash" -v a="$xz_artifact" 'BEGIN {OFS="\t"} $1 == p {$4=h; $5=a} {print}' "$mislabeled_input/packages.tsv" > "$mislabeled_input/packages.tsv.new"; mv -- "$mislabeled_input/packages.tsv.new" "$mislabeled_input/packages.tsv"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$mislabeled_input"
 repo="$tmp/repo"; "$project_root/scripts/build-m8-unsigned-repo.sh" --input-dir "$fixture" --out "$repo" >/dev/null
 "$project_root/scripts/verify-m8-unsigned-repo.sh" --repo "$repo" >/dev/null
 race_publish race-repo "$project_root/scripts/build-m8-unsigned-repo.sh" --input-dir "$fixture"
@@ -107,6 +122,8 @@ make_bad_archive() {
         printf 'install = /usr/bin/unsafe\n' >> "$work_root/root/.PKGINFO"
     elif [[ $dependency == safe-build-dependency ]]; then
         printf 'makedepend = openssl\n' >> "$work_root/root/.PKGINFO"
+    elif [[ $dependency == safe-negative-metadata ]]; then
+        printf 'replaces = vulkan-swrast\nconflict = vulkan-swrast\n' >> "$work_root/root/.PKGINFO"
     elif [[ -n $dependency ]]; then
         printf 'depend = %s\n' "$dependency" >> "$work_root/root/.PKGINFO"
     fi
@@ -115,7 +132,10 @@ make_bad_archive() {
         libalpm-hook) mkdir -p "$work_root/root/usr/share/libalpm/hooks"; printf 'lifecycle\n' > "$work_root/root/usr/share/libalpm/hooks/lifecycle.hook";;
         pacman-hook) mkdir -p "$work_root/root/etc/pacman.d/hooks"; printf 'lifecycle\n' > "$work_root/root/etc/pacman.d/hooks/lifecycle.hook";;
         safe-link) printf 'safe target\n' > "$work_root/root/usr/share/target"; ln -s target "$work_root/root/usr/share/m8";;
+        safe-absolute-link) mkdir -p "$work_root/root/usr/bin"; printf 'safe target\n' > "$work_root/root/usr/bin/safe-target"; ln -s /usr/bin/safe-target "$work_root/root/usr/bin/m8-link";;
+        qemu-absolute-link) mkdir -p "$work_root/root/usr/bin"; ln -s /usr/bin/qemu-system-aarch64 "$work_root/root/usr/bin/m8-link";;
         escaping-link) ln -s ../../../../outside "$work_root/root/usr/share/m8";;
+        escaping-absolute-link) mkdir -p "$work_root/root/usr/bin"; ln -s /usr/../../outside "$work_root/root/usr/bin/hyprland";;
         safe-header-token) mkdir -p "$work_root/root/usr/include"; printf 'generic header\n' > "$work_root/root/usr/include/qemu_fw_cfg.h";;
         qemu-executable) mkdir -p "$work_root/root/usr/bin"; printf 'vm executable\n' > "$work_root/root/usr/bin/qemu-system-aarch64";;
         *) mkdir -p "$work_root/root/usr/share/$path_token"; printf 'bad archive\n' > "$work_root/root/usr/share/$path_token/file";;
@@ -145,15 +165,20 @@ expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive mismatch-version linux-asahi wrong-version aarch64 '' safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive mismatch-arch linux-asahi 7.1.9.asahi1-1 x86_64 '' safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive compressed-forbidden linux-asahi 7.1.9.asahi1-1 aarch64 qemu qemu)"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive dependency-only-qemu linux-asahi 7.1.9.asahi1-1 aarch64 qemu safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive path-only-qemu linux-asahi 7.1.9.asahi1-1 aarch64 '' qemu)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive install-metadata linux-asahi 7.1.9.asahi1-1 aarch64 install-action safe)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive install-file linux-asahi 7.1.9.asahi1-1 aarch64 '' .INSTALL)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive libalpm-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' libalpm-hook)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive pacman-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' pacman-hook)"
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-link linux-asahi 7.1.9.asahi1-1 aarch64 '' safe-link)" >/dev/null
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-absolute-link linux-asahi 7.1.9.asahi1-1 aarch64 '' safe-absolute-link)" >/dev/null
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-build-dependency linux-asahi 7.1.9.asahi1-1 aarch64 safe-build-dependency safe)" >/dev/null
+"$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-negative-metadata linux-asahi 7.1.9.asahi1-1 aarch64 safe-negative-metadata safe)" >/dev/null
 "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive safe-header-token linux-asahi 7.1.9.asahi1-1 aarch64 '' safe-header-token)" >/dev/null
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive escaping-link linux-asahi 7.1.9.asahi1-1 aarch64 '' escaping-link)"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive escaping-absolute-link linux-asahi 7.1.9.asahi1-1 aarch64 '' escaping-absolute-link)"
+expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive qemu-absolute-link linux-asahi 7.1.9.asahi1-1 aarch64 '' qemu-absolute-link)"
 expect_fail "$project_root/scripts/verify-m8-package-closure.sh" --input-dir "$(make_bad_archive qemu-executable linux-asahi 7.1.9.asahi1-1 aarch64 '' qemu-executable)"
 invalid_builder_out="$tmp/libalpm-builder-hook-repo"
 expect_fail "$project_root/scripts/build-m8-unsigned-repo.sh" --input-dir "$(make_bad_archive libalpm-builder-hook linux-asahi 7.1.9.asahi1-1 aarch64 '' libalpm-hook)" --out "$invalid_builder_out"

@@ -41,13 +41,13 @@ done < "$forbidden"
 scan_forbidden() {
     local file=$1 token
     for token in "${forbidden_tokens[@]}"; do
-        if grep -aFqi -- "$token" "$file"; then evidence_die "forbidden token '$token' in $file"; fi
+        if grep -aFqi -- "$token" "$file"; then evidence_die "forbidden token '$token' in $file"; return 1; fi
     done
 }
 scan_forbidden_value() {
     local value=$1 token
     for token in "${forbidden_tokens[@]}"; do
-        if printf '%s\n' "$value" | grep -Fqi -- "$token"; then evidence_die "forbidden token '$token' in declarative value"; fi
+        if printf '%s\n' "$value" | grep -Fqi -- "$token"; then evidence_die "forbidden token '$token' in declarative value"; return 1; fi
     done
 }
 scan_unsafe_actions() {
@@ -83,14 +83,35 @@ scan_archive_paths() {
 }
 scan_archive_types_and_links() {
     local archive=$1
-    "$archive_tool" -cf - --format=mtree --no-xattrs "@$archive" | awk '
+    "$archive_tool" -cf - --format=mtree --no-xattrs "@$archive" | awk -v forbidden_file="$forbidden" '
+        BEGIN {
+            while ((getline token < forbidden_file) > 0) {
+                if (token != "" && token !~ /^#/) forbidden_token[tolower(token)]=1
+            }
+            close(forbidden_file)
+        }
+        function forbidden_path(path, count, i, component, parts, token) {
+            path=tolower(path)
+            count=split(path, parts, "/")
+            for (i=1; i<=count; i++) if (parts[i] in forbidden_token) return 1
+            if (path ~ /^(usr\/)?(s?bin|libexec)\//) {
+                component=parts[count]
+                for (token in forbidden_token) if (index(component, token) == 1) return 1
+            }
+            return 0
+        }
         function safe_link(path, target, combined, count, i, depth, component, parts) {
-            if (path ~ /\\/ || target == "" || target ~ /^\// || target ~ /\\/) return 0
+            if (path ~ /\\/ || target == "" || target ~ /\\/) return 0
             sub(/^\.\//, "", path)
-            combined = path
-            sub(/\/[^\/]*$/, "", combined)
-            if (combined == path) combined = target
-            else combined = combined "/" target
+            if (target ~ /^\//) {
+                if (target == "/" || target ~ /(^|\/)\.\.?($|\/)/) return 0
+                return 1
+            } else {
+                combined = path
+                sub(/\/[^\/]*$/, "", combined)
+                if (combined == path) combined = target
+                else combined = combined "/" target
+            }
             count = split(combined, parts, "/")
             depth = 0
             for (i = 1; i <= count; i++) {
@@ -106,6 +127,9 @@ scan_archive_types_and_links() {
         NR == 1 { if ($0 != "#mtree") bad=1; next }
         {
             path=$1; type=""; link=""; type_count=0; link_count=0
+            normalized_path=path
+            sub(/^\.\//, "", normalized_path)
+            members[normalized_path]=1
             for (i=2; i<=NF; i++) {
                 if ($i ~ /^type=/) { type=substr($i, 6); type_count++ }
                 if ($i ~ /^link=/) { link=substr($i, 6); link_count++ }
@@ -113,13 +137,30 @@ scan_archive_types_and_links() {
             if (path ~ /\\/ || type_count != 1 || type !~ /^(file|dir|link)$/) bad=1
             if (type == "link") {
                 if (link_count != 1 || !safe_link(path, link)) bad=1
+                if (link ~ /^\//) {
+                    absolute_target=link
+                    sub(/^\/+/, "", absolute_target)
+                    absolute_targets[normalized_path]=absolute_target
+                }
             } else if (link_count != 0) bad=1
         }
-        END { exit bad }
+        END {
+            for (path in absolute_targets) {
+                target=absolute_targets[path]
+                if (!(target in members) || forbidden_path(target)) bad=1
+            }
+            exit bad
+        }
     '
 }
 verify_archive() {
-    local archive=$1 expected_package=$2 expected_version=$3 expected_arch=$4 list pkginfo_path pkginfo value
+    local archive=$1 expected_package=$2 expected_version=$3 expected_arch=$4 list pkginfo_path pkginfo value magic
+    magic=$(LC_ALL=C od -An -tx1 -N6 "$archive" | tr -d '[:space:]')
+    case $archive in
+        *.pkg.tar.zst) [[ ${magic:0:8} == 28b52ffd ]] || evidence_die "archive compression does not match .zst suffix: $archive";;
+        *.pkg.tar.xz) [[ $magic == fd377a585a00 ]] || evidence_die "archive compression does not match .xz suffix: $archive";;
+        *) evidence_die "unsupported package archive suffix: $archive";;
+    esac
     list=$(archive_list "$archive") || evidence_die "invalid compressed package archive: $archive"
     [[ -n $list ]] || evidence_die "empty package archive: $archive"
     scan_archive_paths "$archive"
@@ -127,7 +168,6 @@ verify_archive() {
     pkginfo_path=$(printf '%s\n' "$list" | awk 'substr($0,1,2)== "./" {$0=substr($0,3)} $0==".PKGINFO" {n++; p=$0} END {if(n != 1) exit 1; print p}') || evidence_die "archive must contain exactly one .PKGINFO: $archive"
     pkginfo=$(mktemp)
     archive_extract_member "$archive" "$pkginfo_path" > "$pkginfo" || { rm -f -- "$pkginfo"; evidence_die "cannot extract .PKGINFO: $archive"; }
-    scan_forbidden "$pkginfo"
     grep -Eiq '(^|[[:space:]])install[[:space:]]*=' "$pkginfo" && { rm -f -- "$pkginfo"; evidence_die "install action in .PKGINFO: $archive"; }
     for key in pkgname pkgver arch; do
         value=$(awk -F ' = ' -v wanted="$key" '$1 == wanted {n++; v=$2} END {if(n != 1) exit 1; print v}' "$pkginfo") || { rm -f -- "$pkginfo"; evidence_die "invalid $key in .PKGINFO: $archive"; }
@@ -138,8 +178,8 @@ verify_archive() {
         esac
     done
     while IFS= read -r value; do
-        if printf '%s\n' "$value" | grep -Eiq '(qemu|virtio|virgl|llvmpipe|softpipe|swrast|software-render)'; then rm -f -- "$pkginfo"; evidence_die "forbidden dependency in $archive"; return 1; fi
-    done < <(awk -F ' = ' '$1 == "depend" {print $2}' "$pkginfo")
+        if ! scan_forbidden_value "$value"; then rm -f -- "$pkginfo"; return 1; fi
+    done < <(awk -F ' = ' '$1 ~ /^(pkgname|pkgbase|pkgdesc|url|depend|optdepend|provides)$/ {print $2}' "$pkginfo")
     rm -f -- "$pkginfo"
 }
 rows=0
@@ -154,7 +194,7 @@ while IFS=$'\t' read -r package version architecture hash artifact extra; do
     [[ $hash =~ ^[[:xdigit:]]{64}$ ]] || evidence_die "invalid package hash: $package"
     [[ $(awk -v p="$package" '$1 == p {n++} END {print n + 0}' "$required") -eq 1 ]] || evidence_die "package outside required closure: $package"
     [[ $(tail -n +2 "$metadata" | awk -F '\t' -v p="$package" '$1 == p {n++} END {print n + 0}') -eq 1 ]] || evidence_die "duplicate package metadata: $package"
-    [[ $artifact != /* && $artifact != *'/'../* && $artifact != ../* && $artifact != *'/'.. && $artifact =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.pkg\.tar\.zst$ ]] || evidence_die "unsafe artifact path: $artifact"
+    [[ $artifact != /* && $artifact != *'/'../* && $artifact != ../* && $artifact != *'/'.. && $artifact =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.pkg\.tar\.(zst|xz)$ ]] || evidence_die "unsafe artifact path: $artifact"
     scan_forbidden_value "$artifact"
     [[ $(tail -n +2 "$metadata" | awk -F '\t' -v a="$artifact" '$5 == a {n++} END {print n + 0}') -eq 1 ]] || evidence_die "duplicate artifact: $artifact"
     artifact_path="$root/$artifact"; [[ -d "$root/packages" && -f "$root/packages/$artifact" ]] && artifact_path="$root/packages/$artifact"
