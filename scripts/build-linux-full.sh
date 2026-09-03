@@ -157,6 +157,8 @@ docker run --rm \
                 CONFIG_SND_SOC_APPLE_MACAUDIO=m CONFIG_CPU_IDLE=y CONFIG_ARM_APPLE_CPUIDLE=y \
                 CONFIG_CPU_FREQ=y CONFIG_ARM_APPLE_SOC_CPUFREQ=m CONFIG_PM_SLEEP=y \
                 CONFIG_HWMON=y CONFIG_THERMAL=y CONFIG_THERMAL_HWMON=y \
+                CONFIG_TYPEC_SN201202X=m CONFIG_TYPEC_TBT_ALTMODE=m CONFIG_USB4=m \
+                CONFIG_USB_UAS=m CONFIG_HOTPLUG_PCI_PCIE=y CONFIG_MMC_SDHCI_PCI=m \
                 "CONFIG_LOCALVERSION=\"$LINUX_LOCALVERSION\"" "# CONFIG_LOCALVERSION_AUTO is not set"; do
                 grep -Fx "$setting" "$component_build/.config"
             done

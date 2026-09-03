@@ -8,18 +8,21 @@ source "${project_root}/scripts/lib/milestone0-output-root.sh"
 m0_validate_output_root "$project_root"
 readonly output_root="$MILESTONE0_OUTPUT_ROOT"
 
-for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME UBOOT_URL UBOOT_REF UBOOT_COMMIT UBOOT_DEFCONFIG UBOOT_UPSTREAM_URL UBOOT_UPSTREAM_REF UBOOT_UPSTREAM_COMMIT; do
+for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME UBOOT_URL UBOOT_REF UBOOT_COMMIT UBOOT_SOURCE_TREE_COMMIT UBOOT_DEFCONFIG UBOOT_UPSTREAM_URL UBOOT_UPSTREAM_REF UBOOT_UPSTREAM_COMMIT UBOOT_PATCH_SERIES UBOOT_PATCH_SERIES_SHA256; do
     test -n "${!value:-}" || {
         printf 'Missing configuration value: %s\n' "$value" >&2
         exit 1
     }
 done
 [[ "$UBOOT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+[[ "$UBOOT_SOURCE_TREE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 [[ "$UBOOT_UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 [[ "$UBOOT_REF" =~ ^[A-Za-z0-9._/-]+$ ]]
 [[ "$UBOOT_UPSTREAM_REF" =~ ^[A-Za-z0-9._/-]+$ ]]
 command -v docker >/dev/null
 docker info >/dev/null
+test "$(sha256sum "${project_root}/patches/u-boot/${UBOOT_PATCH_SERIES}" | awk '{print $1}')" = \
+    "$UBOOT_PATCH_SERIES_SHA256"
 
 readonly cache_dir="${output_root}/cache"
 readonly mirror="${cache_dir}/u-boot.git"
@@ -37,9 +40,9 @@ else
     git -C "$mirror" remote add upstream "$UBOOT_UPSTREAM_URL"
 fi
 git -C "$mirror" fetch upstream \
-    "+refs/heads/${UBOOT_UPSTREAM_REF}:refs/remotes/upstream/${UBOOT_UPSTREAM_REF}"
+    "+refs/tags/${UBOOT_UPSTREAM_REF}:refs/tags/${UBOOT_UPSTREAM_REF}"
 test "$(git -C "$mirror" rev-parse "refs/heads/${UBOOT_REF}")" = "$UBOOT_COMMIT"
-test "$(git -C "$mirror" rev-parse "refs/remotes/upstream/${UBOOT_UPSTREAM_REF}")" = \
+test "$(git -C "$mirror" rev-parse "refs/tags/${UBOOT_UPSTREAM_REF}^{}")" = \
     "$UBOOT_UPSTREAM_COMMIT"
 git -C "$mirror" merge-base --is-ancestor "$UBOOT_UPSTREAM_COMMIT" "$UBOOT_COMMIT"
 git -C "$mirror" bundle create "${bundle}.tmp" "refs/heads/${UBOOT_REF}"
@@ -66,6 +69,7 @@ docker run --rm \
     --env "BUILD_IMAGE_ID=${image_id}" \
     --env "DEBIAN_SNAPSHOT=${DEBIAN_SNAPSHOT}" \
     --env "UBOOT_COMMIT=${UBOOT_COMMIT}" \
+    --env "UBOOT_SOURCE_TREE_COMMIT=${UBOOT_SOURCE_TREE_COMMIT}" \
     --env "UBOOT_DEFCONFIG=${UBOOT_DEFCONFIG}" \
     --env "UBOOT_REF=${UBOOT_REF}" \
     --env "UBOOT_URL=${UBOOT_URL}" \
@@ -74,7 +78,10 @@ docker run --rm \
     --env "UBOOT_UPSTREAM_COMMIT=${UBOOT_UPSTREAM_COMMIT}" \
     --env "UBOOT_UPSTREAM_REF=${UBOOT_UPSTREAM_REF}" \
     --env "UBOOT_UPSTREAM_URL=${UBOOT_UPSTREAM_URL}" \
+    --env "UBOOT_PATCH_SERIES=${UBOOT_PATCH_SERIES}" \
+    --env "UBOOT_PATCH_SERIES_SHA256=${UBOOT_PATCH_SERIES_SHA256}" \
     --mount "type=bind,src=${bundle},dst=/inputs/u-boot.bundle,readonly" \
+    --mount "type=bind,src=${project_root}/patches/u-boot,dst=/inputs/u-boot-patches,readonly" \
     --mount "type=volume,src=${source_volume},dst=/workspace" \
     --mount "type=bind,src=${output_root},dst=/out" \
     "$BUILD_IMAGE" \
@@ -106,16 +113,25 @@ docker run --rm \
         git -C "$repository" fetch /inputs/u-boot.bundle "$UBOOT_COMMIT"
         git -C "$repository" checkout --detach "$UBOOT_COMMIT"
         test "$(git -C "$repository" rev-parse HEAD)" = "$UBOOT_COMMIT"
+        readonly source_epoch="$(git -C "$repository" show -s --format=%ct "$UBOOT_COMMIT")"
+        test "$(sha256sum "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES" | cut -d " " -f1)" = \
+            "$UBOOT_PATCH_SERIES_SHA256"
+        git -C "$repository" -c user.name="M3 Pro Linux downstream" \
+            -c user.email=m3pro-linux@localhost am --committer-date-is-author-date \
+            "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES"
+        test "$(git -C "$repository" rev-parse HEAD)" = "$UBOOT_SOURCE_TREE_COMMIT"
+        test -z "$(git -C "$repository" status --porcelain --untracked-files=all)"
         grep -Fq '\''of_machine_is_compatible("apple,t6030")'\'' \
             "${repository}/arch/arm/mach-apple/board.c"
         grep -Fq '\''mem_map = t6030_mem_map;'\'' \
             "${repository}/arch/arm/mach-apple/board.c"
+        grep -Fq '\''{ .compatible = "apple,t8122-atcphy" },'\'' \
+            "${repository}/drivers/phy/phy-apple-atc.c"
 
         make -C "$repository" O="$component_build" mrproper
         make -C "$repository" O="$component_build" \
             CROSS_COMPILE=aarch64-linux-gnu- "$UBOOT_DEFCONFIG"
 
-        readonly source_epoch="$(git -C "$repository" show -s --format=%ct HEAD)"
         export KBUILD_BUILD_HOST=milestone0
         export KBUILD_BUILD_TIMESTAMP="$(date -u --date="@${source_epoch}" \
             "+%Y-%m-%d %H:%M:%S UTC")"
@@ -145,6 +161,9 @@ docker run --rm \
         aarch64-linux-gnu-strings "${component_build}/u-boot" \
             | grep -E '\''^apple,t603(0|1|4)$'\'' \
             | LC_ALL=C sort -u > "${stage}/supported-socs.txt"
+        aarch64-linux-gnu-strings "${component_build}/u-boot" \
+            | grep -E '\''^apple,t(6000|8103|8122)-atcphy$'\'' \
+            | LC_ALL=C sort -u > "${stage}/supported-atc-phys.txt"
         dpkg-query -W -f="\${Package}=\${Version}\n" | LC_ALL=C sort > "${stage}/packages.txt"
 
         {
@@ -153,15 +172,19 @@ docker run --rm \
             printf "target=Mac15,6/J514s/T6030\n"
             printf "component=u-boot\n"
             printf "source_url=%s\n" "$UBOOT_URL"
-            printf "source_commit=%s\n" "$(git -C "$repository" rev-parse HEAD)"
+            printf "source_commit=%s\n" "$UBOOT_COMMIT"
+            printf "source_tree_commit=%s\n" "$UBOOT_SOURCE_TREE_COMMIT"
             printf "source_ref=%s\n" "$UBOOT_REF"
             printf "upstream_url=%s\n" "$UBOOT_UPSTREAM_URL"
             printf "upstream_ref=%s\n" "$UBOOT_UPSTREAM_REF"
             printf "upstream_commit=%s\n" "$UBOOT_UPSTREAM_COMMIT"
+            printf "patch_series=%s\n" "$UBOOT_PATCH_SERIES"
+            printf "patch_series_sha256=%s\n" "$UBOOT_PATCH_SERIES_SHA256"
             printf "source_describe=%s\n" "$(git -C "$repository" describe --always --dirty)"
             printf "source_clean=%s\n" "$(test -z "$(git -C "$repository" status --porcelain --untracked-files=all)" && printf true || printf false)"
             printf "defconfig=%s\n" "$UBOOT_DEFCONFIG"
             printf "t6030_memory_map=true\n"
+            printf "t8122_atc_phy_match=true\n"
             printf "source_date_epoch=%s\n" "$source_epoch"
             printf "workspace_filesystem=%s\n" "$filesystem_type"
             printf "debian_snapshot=%s\n" "$DEBIAN_SNAPSHOT"
@@ -179,7 +202,7 @@ docker run --rm \
         (
             cd "$stage"
             sha256sum build.log config file.txt manifest.txt packages.txt \
-                supported-socs.txt u-boot u-boot-nodtb.bin > SHA256SUMS
+                supported-atc-phys.txt supported-socs.txt u-boot u-boot-nodtb.bin > SHA256SUMS
         )
 
         mv "$stage" "$destination"

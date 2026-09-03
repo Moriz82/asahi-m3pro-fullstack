@@ -27,6 +27,32 @@ Static verification always reports `hardware_acceptance=false`; native port,
 PD, display, dock, fault-injection, data-integrity, and recovery acceptance
 remain human-authorized gates.
 
+## Pinned source readiness
+
+`scripts/check-m5-source-readiness.sh` binds the M2 target topology plus the
+Apple DWC3/ATC PHY, SN201202x PD, USB4/Thunderbolt, UAS, and GL9755 SDHCI
+drivers to the pinned source tree. It also requires the corresponding modules
+from a checksummed M0 Linux artifact. The supplied source must be the clean Git
+worktree root at the exact patched source commit; the canonical check runs
+against the case-sensitive Docker source volume rather than the lossy macOS
+checkout.
+
+The current pinned tree has three USB-C controller/PHY/connector paths, dual
+data and power roles, SN201202x PD nodes, a generic USB4/Thunderbolt source
+path, and the board's PCIe GL9755 SDXC node. The isolated M5 development build
+proves those configured sources compile; it is not native hardware evidence.
+The U-Boot build reuses upstream commit `dbd2154cb0d3` as a hash-pinned patch
+on the permitted fork baseline. That commit adds the `apple,t8122-atcphy`
+match needed by the T6030 device-tree fallback; compiled U-Boot evidence must
+contain the match. The fork base is tied to immutable upstream release tag
+`asahi-v2026.04-2`, so movement of the mutable `asahi-releng` upstream branch
+cannot silently change provenance.
+The target still lacks contracted DP output wiring and HDMI controller/output
+topology, so the source gate remains
+`blocked-target-display-link-topology`. M3's missing target DCP topology is a
+related prerequisite. IDA or Binary Ninja would not close this public-source
+topology gap and are not used as substitute evidence.
+
 ## Uniform software gate and handoff
 
 The verifier reports `tooling_valid`, `evidence_valid`, and

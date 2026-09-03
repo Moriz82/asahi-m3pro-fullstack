@@ -1,0 +1,27 @@
+From dbd2154cb0d3a5552505cfcc00a8b5f8da737030 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 3 Sep 2026 11:30:00 +0200
+Subject: [PATCH] phy: apple-atc: Add t8122 compatible
+
+Add "apple,t8122-atcphy" compatible which is required in the linux
+driver for M3 and M3 Pro/Max support. phy-apple-atc is a dependency of
+dwc3 on Apple silicon platforms but no driver changes are needed for M3
+support as the driver is empty anyway.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/phy/phy-apple-atc.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/phy/phy-apple-atc.c b/drivers/phy/phy-apple-atc.c
+index 78eedf676b09324610009e3fb992ebd5defae318..e683affece205c5c8c0871adc42f5abc03fc6f41 100644
+--- a/drivers/phy/phy-apple-atc.c
++++ b/drivers/phy/phy-apple-atc.c
+@@ -43,6 +43,7 @@ static int apple_atcphy_reset_probe(struct udevice *dev)
+ static const struct udevice_id apple_atcphy_ids[] = {
+ 	{ .compatible = "apple,t6000-atcphy" },
+ 	{ .compatible = "apple,t8103-atcphy" },
++	{ .compatible = "apple,t8122-atcphy" },
+ 	{ }
+ };
+ 

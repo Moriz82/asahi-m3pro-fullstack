@@ -180,8 +180,10 @@ the development plan; it has no full kernel `Image`, module/package build,
 Linux tree contains the `apple,j514s` / `apple,t6030` device tree. U-Boot's
 Apple platform accepts the board tree from m1n1 at runtime, so the verified
 Linux DTB is included ahead of `u-boot-nodtb.bin`; no duplicate U-Boot DTS is
-introduced. The pinned `asahi-releng` U-Boot commit includes the upstream
-T6030 memory map and the verifier checks that support in the compiled binary.
+introduced. The pinned `asahi-releng` U-Boot base includes the upstream T6030
+memory map. Its immutable upstream release tag and the reused, hash-pinned
+upstream T8122-ATC compatibility patch are recorded in the manifest; the
+verifier checks both T6030 and ATC matches in the compiled binary.
 Neither milestone is a successful hardware-boot claim. There is no native
 installation, startup-disk change, firmware operation, or hardware validation
 in these scripts.

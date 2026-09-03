@@ -1,0 +1,12 @@
+# format=1
+# target=Mac15,6/J514s/T6030
+# source_tree_commit=d8082213fc5a3a64c8b9464a7d5c82d13b1ea115
+# Static source contract only. Matching these bytes is not hardware acceptance.
+
+75b9b68c3096a151d31828650887cf7a7caa88c7f0dd5655f4c4727959953939  drivers/phy/apple/atc.c
+b23e3fcbb565a92b3b867f3347614f70a0fb8e193a3917ace4bf9f4c991cdbc3  drivers/mmc/host/sdhci-pci-gli.c
+51976d297cc1e01b712e8318078f1a720d5bae1079eac2e9c48680de308c1288  drivers/mmc/host/sdhci-pci-core.c
+5daaf2ec5c4be7bf89f664ed93ca9c71a135773a13e27c2042c9a40d1647d0e7  drivers/thunderbolt/nhi.c
+6d2ff775e11b62d1f343b07fbcfdf4a73b4159ac38ff2c2e1ee7c6df1b4a4420  drivers/usb/dwc3/dwc3-apple.c
+11fec24a95b592bd27fa854029fd87f6ac5b91de0c7019c7e05469e18c5fd47b  drivers/usb/typec/altmodes/thunderbolt.c
+a0f5b62407cdbf9c22bee02400864c7802be75ca7cb4a4fb170d18eb2937b17e  drivers/usb/typec/tipd/spmi.c
