@@ -2,13 +2,17 @@
 set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-source "${project_root}/config/milestone0.env"
+source "${project_root}/scripts/lib/u-boot-config-overlay.sh"
+m0_load_u_boot_config
+u_boot_derive_patch_policy
+u_boot_require_patch_file "$project_root"
 readonly source_volume="${SOURCE_VOLUME_OVERRIDE:-${SOURCE_VOLUME}}"
 source "${project_root}/scripts/lib/milestone0-output-root.sh"
 m0_validate_output_root "$project_root"
 readonly output_root="$MILESTONE0_OUTPUT_ROOT"
+u_boot_require_candidate_isolation "$project_root" "$output_root" "$source_volume"
 
-for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME UBOOT_URL UBOOT_REF UBOOT_COMMIT UBOOT_SOURCE_TREE_COMMIT UBOOT_DEFCONFIG UBOOT_UPSTREAM_URL UBOOT_UPSTREAM_REF UBOOT_UPSTREAM_COMMIT UBOOT_PATCH_SERIES UBOOT_PATCH_SERIES_SHA256; do
+for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME UBOOT_URL UBOOT_REF UBOOT_COMMIT UBOOT_SOURCE_TREE_COMMIT UBOOT_DEFCONFIG UBOOT_UPSTREAM_URL UBOOT_UPSTREAM_REF UBOOT_UPSTREAM_COMMIT; do
     test -n "${!value:-}" || {
         printf 'Missing configuration value: %s\n' "$value" >&2
         exit 1
@@ -19,10 +23,20 @@ done
 [[ "$UBOOT_UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 [[ "$UBOOT_REF" =~ ^[A-Za-z0-9._/-]+$ ]]
 [[ "$UBOOT_UPSTREAM_REF" =~ ^[A-Za-z0-9._/-]+$ ]]
+if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+    for value in UBOOT_UPSTREAM_TAG_OBJECT UBOOT_UPSTREAM_TAG_SIGNER UBOOT_UPSTREAM_TAG_SIGNATURE_STATUS UBOOT_REQUIRED_ANCESTOR_COMMITS; do
+        test -n "${!value:-}" || {
+            printf 'Missing upstream-integrated configuration value: %s\n' "$value" >&2
+            exit 1
+        }
+    done
+    [[ "$UBOOT_UPSTREAM_TAG_OBJECT" =~ ^[0-9a-f]{40}$ ]]
+    [[ "$UBOOT_UPSTREAM_TAG_SIGNER" =~ ^[0-9A-F]{40}$ ]]
+    [[ "$UBOOT_UPSTREAM_TAG_SIGNATURE_STATUS" == blocked-expired-key ]]
+    [[ "$UBOOT_REQUIRED_ANCESTOR_COMMITS" =~ ^[0-9a-f]{40}[[:space:]][0-9a-f]{40}[[:space:]][0-9a-f]{40}$ ]]
+fi
 command -v docker >/dev/null
 docker info >/dev/null
-test "$(sha256sum "${project_root}/patches/u-boot/${UBOOT_PATCH_SERIES}" | awk '{print $1}')" = \
-    "$UBOOT_PATCH_SERIES_SHA256"
 
 readonly cache_dir="${output_root}/cache"
 readonly mirror="${cache_dir}/u-boot.git"
@@ -44,8 +58,21 @@ git -C "$mirror" fetch upstream \
 test "$(git -C "$mirror" rev-parse "refs/heads/${UBOOT_REF}")" = "$UBOOT_COMMIT"
 test "$(git -C "$mirror" rev-parse "refs/tags/${UBOOT_UPSTREAM_REF}^{}")" = \
     "$UBOOT_UPSTREAM_COMMIT"
-git -C "$mirror" merge-base --is-ancestor "$UBOOT_UPSTREAM_COMMIT" "$UBOOT_COMMIT"
-git -C "$mirror" bundle create "${bundle}.tmp" "refs/heads/${UBOOT_REF}"
+if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+    test "$(git -C "$mirror" cat-file -t "refs/tags/${UBOOT_UPSTREAM_REF}")" = tag
+    test "$(git -C "$mirror" rev-parse "refs/tags/${UBOOT_UPSTREAM_REF}")" = \
+        "$UBOOT_UPSTREAM_TAG_OBJECT"
+    for ancestor in $UBOOT_REQUIRED_ANCESTOR_COMMITS; do
+        git -C "$mirror" merge-base --is-ancestor "$ancestor" "$UBOOT_SOURCE_TREE_COMMIT"
+    done
+else
+    git -C "$mirror" merge-base --is-ancestor "$UBOOT_UPSTREAM_COMMIT" "$UBOOT_COMMIT"
+fi
+bundle_refs=("refs/heads/${UBOOT_REF}")
+if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+    bundle_refs+=("refs/tags/${UBOOT_UPSTREAM_REF}")
+fi
+git -C "$mirror" bundle create "${bundle}.tmp" "${bundle_refs[@]}"
 git -C "$mirror" bundle verify "${bundle}.tmp" >/dev/null
 mv "${bundle}.tmp" "$bundle"
 
@@ -64,6 +91,11 @@ test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}'
     asahi-m3pro-fullstack
 readonly image_id="$(docker image inspect --format '{{.Id}}' "$BUILD_IMAGE")"
 
+patch_mount_args=()
+if [[ "$UBOOT_PATCH_POLICY" == legacy ]]; then
+    patch_mount_args+=(--mount "type=bind,src=${project_root}/patches/u-boot,dst=/inputs/u-boot-patches,readonly")
+fi
+
 docker run --rm \
     --env "BUILD_IMAGE=${BUILD_IMAGE}" \
     --env "BUILD_IMAGE_ID=${image_id}" \
@@ -78,10 +110,15 @@ docker run --rm \
     --env "UBOOT_UPSTREAM_COMMIT=${UBOOT_UPSTREAM_COMMIT}" \
     --env "UBOOT_UPSTREAM_REF=${UBOOT_UPSTREAM_REF}" \
     --env "UBOOT_UPSTREAM_URL=${UBOOT_UPSTREAM_URL}" \
+    --env "UBOOT_PATCH_POLICY=${UBOOT_PATCH_POLICY}" \
     --env "UBOOT_PATCH_SERIES=${UBOOT_PATCH_SERIES}" \
     --env "UBOOT_PATCH_SERIES_SHA256=${UBOOT_PATCH_SERIES_SHA256}" \
+    --env "UBOOT_UPSTREAM_TAG_OBJECT=${UBOOT_UPSTREAM_TAG_OBJECT-}" \
+    --env "UBOOT_UPSTREAM_TAG_SIGNER=${UBOOT_UPSTREAM_TAG_SIGNER-}" \
+    --env "UBOOT_UPSTREAM_TAG_SIGNATURE_STATUS=${UBOOT_UPSTREAM_TAG_SIGNATURE_STATUS-}" \
+    --env "UBOOT_REQUIRED_ANCESTOR_COMMITS=${UBOOT_REQUIRED_ANCESTOR_COMMITS-}" \
     --mount "type=bind,src=${bundle},dst=/inputs/u-boot.bundle,readonly" \
-    --mount "type=bind,src=${project_root}/patches/u-boot,dst=/inputs/u-boot-patches,readonly" \
+    ${patch_mount_args[@]+"${patch_mount_args[@]}"} \
     --mount "type=volume,src=${source_volume},dst=/workspace" \
     --mount "type=bind,src=${output_root},dst=/out" \
     "$BUILD_IMAGE" \
@@ -111,20 +148,40 @@ docker run --rm \
         test "$(git -C "$repository" remote get-url origin)" = "$UBOOT_URL"
         test -z "$(git -C "$repository" status --porcelain --untracked-files=all)"
         git -C "$repository" fetch /inputs/u-boot.bundle "$UBOOT_COMMIT"
+        if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+            if ! git -C "$repository" show-ref --verify --quiet "refs/tags/${UBOOT_UPSTREAM_REF}"; then
+                git -C "$repository" fetch /inputs/u-boot.bundle \
+                    "refs/tags/${UBOOT_UPSTREAM_REF}:refs/tags/${UBOOT_UPSTREAM_REF}"
+            fi
+            test "$(git -C "$repository" cat-file -t "refs/tags/${UBOOT_UPSTREAM_REF}")" = tag
+            test "$(git -C "$repository" rev-parse "refs/tags/${UBOOT_UPSTREAM_REF}")" = \
+                "$UBOOT_UPSTREAM_TAG_OBJECT"
+            test "$(git -C "$repository" rev-parse "refs/tags/${UBOOT_UPSTREAM_REF}^{}")" = \
+                "$UBOOT_UPSTREAM_COMMIT"
+            for ancestor in $UBOOT_REQUIRED_ANCESTOR_COMMITS; do
+                git -C "$repository" merge-base --is-ancestor "$ancestor" "$UBOOT_SOURCE_TREE_COMMIT"
+            done
+        fi
         git -C "$repository" checkout --detach "$UBOOT_COMMIT"
         test "$(git -C "$repository" rev-parse HEAD)" = "$UBOOT_COMMIT"
         readonly source_epoch="$(git -C "$repository" show -s --format=%ct "$UBOOT_COMMIT")"
-        test "$(sha256sum "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES" | cut -d " " -f1)" = \
-            "$UBOOT_PATCH_SERIES_SHA256"
-        git -C "$repository" -c user.name="M3 Pro Linux downstream" \
-            -c user.email=m3pro-linux@localhost am --committer-date-is-author-date \
-            "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES"
+        if [[ "$UBOOT_PATCH_POLICY" == legacy ]]; then
+            test "$(sha256sum "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES" | cut -d " " -f1)" = \
+                "$UBOOT_PATCH_SERIES_SHA256"
+            git -C "$repository" -c user.name="M3 Pro Linux downstream" \
+                -c user.email=m3pro-linux@localhost am --committer-date-is-author-date \
+                "/inputs/u-boot-patches/$UBOOT_PATCH_SERIES"
+        fi
         test "$(git -C "$repository" rev-parse HEAD)" = "$UBOOT_SOURCE_TREE_COMMIT"
         test -z "$(git -C "$repository" status --porcelain --untracked-files=all)"
         grep -Fq '\''of_machine_is_compatible("apple,t6030")'\'' \
             "${repository}/arch/arm/mach-apple/board.c"
         grep -Fq '\''mem_map = t6030_mem_map;'\'' \
             "${repository}/arch/arm/mach-apple/board.c"
+        if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+            grep -Fq '\''if (FIELD_GET(APPLE_PMGR_AUTO_ENABLE, reg))'\'' \
+                "${repository}/drivers/power/domain/apple-pmgr.c"
+        fi
         grep -Fq '\''{ .compatible = "apple,t8122-atcphy" },'\'' \
             "${repository}/drivers/phy/phy-apple-atc.c"
 
@@ -149,6 +206,15 @@ docker run --rm \
             exit 1
         fi
         mkdir "$stage"
+
+        if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+            git -C "$repository" cat-file -p "$UBOOT_UPSTREAM_TAG_OBJECT" > \
+                "${stage}/upstream-tag.txt"
+            test "$(git hash-object -t tag "${stage}/upstream-tag.txt")" = \
+                "$UBOOT_UPSTREAM_TAG_OBJECT"
+            printf "%s\n" $UBOOT_REQUIRED_ANCESTOR_COMMITS > \
+                "${stage}/upstream-required-ancestors.txt"
+        fi
 
         LC_ALL=C make -C "$repository" O="$component_build" \
             CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" \
@@ -180,6 +246,17 @@ docker run --rm \
             printf "upstream_commit=%s\n" "$UBOOT_UPSTREAM_COMMIT"
             printf "patch_series=%s\n" "$UBOOT_PATCH_SERIES"
             printf "patch_series_sha256=%s\n" "$UBOOT_PATCH_SERIES_SHA256"
+            if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+                printf "patch_policy=upstream-integrated\n"
+                printf "upstream_tag_object=%s\n" "$UBOOT_UPSTREAM_TAG_OBJECT"
+                printf "upstream_tag_object_sha256=%s\n" "$(sha256sum "${stage}/upstream-tag.txt" | cut -d " " -f1)"
+                printf "expected_signer=%s\n" "$UBOOT_UPSTREAM_TAG_SIGNER"
+                printf "signature_status=%s\n" "$UBOOT_UPSTREAM_TAG_SIGNATURE_STATUS"
+                printf "required_ancestor_commits=%s\n" "$UBOOT_REQUIRED_ANCESTOR_COMMITS"
+                printf "pmgr_auto_enable_early_return=true\n"
+                printf "hardware_acceptance=false\n"
+                printf "canonical_promotion=false\n"
+            fi
             printf "source_describe=%s\n" "$(git -C "$repository" describe --always --dirty)"
             printf "source_clean=%s\n" "$(test -z "$(git -C "$repository" status --porcelain --untracked-files=all)" && printf true || printf false)"
             printf "defconfig=%s\n" "$UBOOT_DEFCONFIG"
@@ -201,14 +278,27 @@ docker run --rm \
         file "${stage}/u-boot" "${stage}/u-boot-nodtb.bin" > "${stage}/file.txt"
         (
             cd "$stage"
-            sha256sum build.log config file.txt manifest.txt packages.txt \
-                supported-atc-phys.txt supported-socs.txt u-boot u-boot-nodtb.bin > SHA256SUMS
+            files=(build.log config file.txt manifest.txt packages.txt \
+                supported-atc-phys.txt supported-socs.txt u-boot u-boot-nodtb.bin)
+            if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+                files+=(upstream-required-ancestors.txt upstream-tag.txt)
+            fi
+            sha256sum "${files[@]}" > SHA256SUMS
         )
 
         mv "$stage" "$destination"
         ln -s "$run_id" "$latest_tmp"
         mv -Tf "$latest_tmp" "$latest"
-        printf "u-boot.baseline=%s\n" "$destination"
+        if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+            printf "u-boot.candidate=%s\n" "$destination"
+        else
+            printf "u-boot.baseline=%s\n" "$destination"
+        fi
     '
 
-"${project_root}/scripts/verify-u-boot.sh" "${output_root}/milestone0/u-boot/latest"
+if [[ "$UBOOT_PATCH_POLICY" == upstream-integrated ]]; then
+    "${project_root}/scripts/verify-u-boot.sh" --allow-noncanonical-candidate \
+        "${output_root}/milestone0/u-boot/latest"
+else
+    "${project_root}/scripts/verify-u-boot.sh" "${output_root}/milestone0/u-boot/latest"
+fi

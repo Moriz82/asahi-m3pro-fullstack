@@ -67,6 +67,27 @@ an M3-support implementation. If the project later rebases to mainline, that
 patch must be re-evaluated against mainline's different PCIe binding structure
 instead of carried automatically.
 
+## U-Boot asahi-v2026.07-1 candidate
+
+The official `asahi-releng` head is pinned at
+`dbd2154cb0d3a5552505cfcc00a8b5f8da737030`, also the peeled commit of the
+annotated `asahi-v2026.07-1` tag (tag object
+`9990962e9cb48438b370212f2815193329c0d99c`). The isolated candidate path is
+`out/isolated/u-boot-asahi-v2026.07-1`; it includes the tag reference in its
+input bundle and stages the exact tag object text for checksum verification.
+Required ancestors are `e23275e7b46f1f582fde4dd7c824e2263477e999`,
+`51b63835a99d660933546251e45ce499500ff355`, and
+`dbd2154cb0d3a5552505cfcc00a8b5f8da737030`. The source checks cover the
+T6030 map, the PMGR `AUTO_ENABLE` early return, and the T8122 ATC PHY match.
+
+The tag names signer `622BE98800AB7C215C7DE056A11B3CDB8D2F6566`, but the key
+expired before the tag timestamp. The candidate therefore records
+`blocked-expired-key`, has `hardware_acceptance=false` and
+`canonical_promotion=false`, and cannot promote to canonical evidence. No
+public key is added. IDA and Binary Ninja are unnecessary because the
+relevant implementation is public source. This candidate is not a native
+support claim.
+
 ## Reuse map
 
 | Milestone | Current official status | Project action |

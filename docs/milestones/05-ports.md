@@ -41,12 +41,31 @@ The current pinned tree has three USB-C controller/PHY/connector paths, dual
 data and power roles, SN201202x PD nodes, a generic USB4/Thunderbolt source
 path, and the board's PCIe GL9755 SDXC node. The isolated M5 development build
 proves those configured sources compile; it is not native hardware evidence.
-The U-Boot build reuses upstream commit `dbd2154cb0d3` as a hash-pinned patch
-on the permitted fork baseline. That commit adds the `apple,t8122-atcphy`
-match needed by the T6030 device-tree fallback; compiled U-Boot evidence must
-contain the match. The fork base is tied to immutable upstream release tag
-`asahi-v2026.04-2`, so movement of the mutable `asahi-releng` upstream branch
-cannot silently change provenance.
+The legacy U-Boot evidence remains pinned to the permitted fork baseline and
+its hash-checked ATC patch. A separate candidate uses the exact annotated
+`asahi-v2026.07-1` tag and peeled commit `dbd2154cb0d3a5552505cfcc00a8b5f8da737030`
+from the official repository, with no patch mount or local `git am` step. Run
+it only with a unique isolated output path and fresh labeled source volume:
+
+```bash
+candidate_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+candidate_root="$PWD/out/isolated/u-boot-asahi-v2026.07-1-$candidate_id"
+candidate_volume="asahi-m3pro-u-boot-$candidate_id"
+docker volume create \
+  --label com.moriz.project=asahi-m3pro-fullstack \
+  --label com.moriz.purpose=u-boot-isolated-candidate \
+  "$candidate_volume"
+MILESTONE0_OUTPUT_ROOT="$candidate_root" \
+SOURCE_VOLUME_OVERRIDE="$candidate_volume" \
+UBOOT_CONFIG_OVERLAY="$PWD/config/u-boot-asahi-v2026.07-1.env" \
+./scripts/build-u-boot.sh
+```
+
+The candidate records T6030 mapping, PMGR AUTO_ENABLE handling, and the
+`apple,t8122-atcphy` match. Its signature state is explicitly
+`blocked-expired-key`; it is not canonical and does not establish native
+hardware acceptance. IDA and Binary Ninja are unnecessary because the needed
+source is public.
 The target still lacks contracted DP output wiring and HDMI controller/output
 topology, so the source gate remains
 `blocked-target-display-link-topology`. M3's missing target DCP topology is a
