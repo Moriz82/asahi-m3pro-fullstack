@@ -24,13 +24,15 @@ fi
 
 test -n "$M1N1DEVICE" || { printf 'M1N1DEVICE must be explicit.\n' >&2; exit 2; }
 test -n "$M1_M1N1_SOURCE_DIR" || { printf 'M1_M1N1_SOURCE_DIR must be explicit.\n' >&2; exit 2; }
-readonly image="${m0_root}/${M1_KERNEL_RELATIVE}"
-readonly dtb="${m0_root}/${M1_DTB_RELATIVE}"
-readonly initramfs="${output_root}/initramfs/latest/${M1_INITRAMFS_NAME}"
+readonly linux_run="$(cd "${m0_root}/linux-full/latest" && pwd -P)"
+readonly initramfs_run="$(cd "${output_root}/initramfs/latest" && pwd -P)"
+readonly image="${linux_run}/${M1_KERNEL_RELATIVE#linux-full/latest/}"
+readonly dtb="${linux_run}/${M1_DTB_RELATIVE#linux-full/latest/}"
+readonly initramfs="${initramfs_run}/${M1_INITRAMFS_NAME}"
 readonly tool="${M1_M1N1_SOURCE_DIR}/${M1_M1N1_TOOL_RELATIVE}"
 test -s "$image" && test -s "$dtb" && test -s "$initramfs" && test -f "$tool" || {
     printf 'Missing one or more dry-run inputs; build and verify M0/M1 first.\n' >&2
     exit 1
 }
-"${project_root}/scripts/verify-milestone1-initramfs.sh"
+"${project_root}/scripts/verify-milestone1-initramfs.sh" "$initramfs_run" "$linux_run"
 build_command "$M1N1DEVICE" "$tool" "$image" "$dtb" "$initramfs"

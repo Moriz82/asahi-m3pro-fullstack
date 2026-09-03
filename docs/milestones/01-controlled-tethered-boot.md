@@ -40,7 +40,9 @@ a symlink to the pinned BusyBox; extra executables and changed link targets are
 rejected.
 
 The dry run prints the exact command without opening the tether or touching the
-device. The command is the pinned m1n1 proxyclient Linux tool with
+device. It resolves and verifies the physical versioned M0/M1 run directories
+before rendering the command, so later `latest` rotation cannot change the
+reviewed inputs. The command is the pinned m1n1 proxyclient Linux tool with
 `--compression none`, followed by `Image`, the J514s DTB, and the initramfs.
 
 ## Execute deliberately
