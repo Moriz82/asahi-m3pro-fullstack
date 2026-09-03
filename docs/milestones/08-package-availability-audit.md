@@ -21,9 +21,18 @@ update or rollback.
   with the selected desktop packages. Its signed development repository is a
   separate noncanonical artifact, not a replacement for either upstream trust
   check.
+- `out/isolated/m8-full-platform-candidate-20260903T120409Z` composes the two
+  byte-identical M0 kernel packages, five signed Arch Linux ARM desktop
+  packages, and 16 signed Asahi ALARM platform packages under the checked-in
+  23-package contract. It preserves 21 upstream detached signatures and hashes
+  the four lifecycle files without executing them. Its `SHA256SUMS` file
+  hashes to
+  `a46cc2bad33e261832ac8558f2439315ed9a5b5d9b575bf2ce7265bfeb962e56`.
 
 These artifacts establish current package availability and provenance only.
-They do not prove installation, runtime behavior, J514s support, or rollback.
+The full-platform candidate is not a generated or signed repository and is
+explicitly unauthorized for installation. These artifacts do not prove
+installation, runtime behavior, J514s support, or rollback.
 
 ## Live authoritative-source result
 

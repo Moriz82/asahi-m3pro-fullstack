@@ -35,6 +35,40 @@ build-system fingerprint, verifies the keyring package and each required
 Hyprland-side package, and records the upstream database policy without
 inventing a nonexistent database signature.
 
+`config/milestone8-full-platform-packages.tsv` joins those verified inputs into
+one explicit 23-package development contract: the two local M0 kernel packages,
+five Arch Linux ARM desktop packages, and 16 Asahi ALARM platform packages.
+`build-m8-full-platform-candidate.sh` copies only byte-identical source
+artifacts, preserves all 21 available upstream package signatures, catalogs the
+four lifecycle files contained in signed packages, binds every source-evidence
+digest, and publishes through an atomic no-replace rename. It deliberately does
+not create or sign a pacman repository:
+
+```sh
+SOFTWARE_OUTPUT_ROOT=/absolute/output-root \
+./scripts/build-m8-full-platform-candidate.sh \
+  --core-input /absolute/eight-package-input \
+  --m0-packages /absolute/m0-linux-package-evidence \
+  --asahi-evidence /absolute/asahi-signed-evidence \
+  --arch-evidence /absolute/archlinuxarm-signed-evidence \
+  --out /absolute/output-root/candidate
+
+./scripts/verify-m8-full-platform-candidate.sh \
+  --candidate /absolute/output-root/candidate \
+  --core-input /absolute/eight-package-input \
+  --m0-packages /absolute/m0-linux-package-evidence \
+  --asahi-evidence /absolute/asahi-signed-evidence \
+  --arch-evidence /absolute/archlinuxarm-signed-evidence
+```
+
+The verifier rechecks both upstream trust paths, the M0 checksum closure, exact
+package identity and byte provenance, the full file inventory, lifecycle-file
+hashes, and all nested checksums. The artifact stays
+`repository_signed=false`, `installation_authorized=false`, `installed=false`,
+and `hardware_acceptance=false`. In particular, preserving an upstream
+`.INSTALL` file or pacman hook is evidence about package content, not permission
+to execute it.
+
 `build-m8-signed-repo.sh` is a separate development-only path for the eight
 locally supplied closure packages. Run it in the pinned Arch Linux ARM image,
 give it an external GnuPG home and a full fingerprint, and keep that key home
@@ -64,7 +98,7 @@ packets, and reuses the package-closure verifier. Run
 public-key-only, tamper, key-substitution, secret-key, inventory, and builder
 failure cases.
 
-This signed repository remains `canonical=false`, `published=false`,
+The separate eight-package signed repository remains `canonical=false`, `published=false`,
 `installed=false`, and `hardware_acceptance=false`. It includes only the
 current eight-package static closure, not the full platform package set or a
 second set of rollback package versions. It therefore closes signing-tooling

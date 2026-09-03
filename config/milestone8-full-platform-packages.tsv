@@ -1,0 +1,24 @@
+# package<TAB>role<TAB>source
+alsa-ucm-conf-asahi	audio-routing	asahi-alarm
+aquamarine	compositor-backend	archlinuxarm
+asahi-alarm-keyring	repository-trust	asahi-alarm
+asahi-audio	audio-dsp	asahi-alarm
+asahi-configs	platform-configuration	asahi-alarm
+asahi-fwextract	firmware-extraction	asahi-alarm
+asahi-meta	platform-meta	asahi-alarm
+asahi-nvram	boot-variables	asahi-alarm
+asahi-scripts	platform-services	asahi-alarm
+asahi-wifisync	firmware-synchronization	asahi-alarm
+bankstown	audio-routing	asahi-alarm
+hyprland	compositor	archlinuxarm
+libinput	input	archlinuxarm
+linux-asahi	kernel	local-m0
+linux-asahi-headers	kernel-headers	local-m0
+m1n1	boot-stage	asahi-alarm
+mesa	apple-gpu-userspace	asahi-alarm
+speakersafetyd	speaker-safety	asahi-alarm
+tiny-dfr	display-helper	asahi-alarm
+triforce-lv2	audio-dsp-plugin	asahi-alarm
+uboot-asahi	uefi-boot	asahi-alarm
+wayland	wayland-protocol	archlinuxarm
+xdg-desktop-portal-hyprland	desktop-portal	archlinuxarm
