@@ -68,6 +68,12 @@ printf '#!/bin/sh\nhash=%s\nfor arg in "$@"; do case "$arg" in */busybox) printf
     "$M1_BUSYBOX_SHA256" "$real_shasum" >"$tmp/fake-tools/shasum"
 chmod +x "$tmp/fake-tools/file" "$tmp/fake-tools/readelf" "$tmp/fake-tools/shasum"
 PATH="$tmp/fake-tools:$PATH" MILESTONE0_OUTPUT_ROOT="$tmp/m0" "${project_root}/scripts/verify-milestone1-initramfs.sh" "$archive_fixture"
+mkdir -p "$tmp/m1/initramfs" "$tmp/m1-source/proxyclient/tools"
+ln -s "$archive_fixture" "$tmp/m1/initramfs/latest"
+printf '# dry-run fixture\n' >"$tmp/m1-source/proxyclient/tools/linux.py"
+dry_run_output="$(PATH="$tmp/fake-tools:$PATH" MILESTONE0_OUTPUT_ROOT="$tmp/m0" MILESTONE1_OUTPUT_ROOT="$tmp/m1" \
+    M1N1DEVICE="$test_device" M1_M1N1_SOURCE_DIR="$tmp/m1-source" "${project_root}/scripts/milestone1-dry-run.sh")"
+[[ "$(tail -n 1 <<<"$dry_run_output")" == "M1N1DEVICE=${test_device} python3 ${tmp}/m1-source/proxyclient/tools/linux.py --compression none ${m0_run}/Image ${m0_run}/dtbs/apple/t6030-j514s.dtb ${archive_fixture}/milestone1-initramfs.cpio.gz" ]]
 m0_rotated="$m0_root/linux-full/20260902T000001Z"
 mkdir -p "$m0_rotated/dtbs/apple"
 cp "$m0_run/Image" "$m0_rotated/Image"

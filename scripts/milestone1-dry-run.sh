@@ -9,9 +9,9 @@ readonly output_root="${MILESTONE1_OUTPUT_ROOT:-${MILESTONE0_OUTPUT_ROOT:-${proj
 readonly m0_root="${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0"
 
 build_command() {
-    local device="$1" tool="$2" image="$3" dtb="$4" initramfs="$5"
+    local command_device="$1" command_tool="$2" command_image="$3" command_dtb="$4" command_initramfs="$5"
     printf 'M1N1DEVICE=%q python3 %q --compression %q %q %q %q\n' \
-        "$device" "$tool" "$M1_COMPRESSION" "$image" "$dtb" "$initramfs"
+        "$command_device" "$command_tool" "$M1_COMPRESSION" "$command_image" "$command_dtb" "$command_initramfs"
 }
 
 if [[ "${1:-}" == --self-test ]]; then
