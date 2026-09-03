@@ -62,3 +62,29 @@ The Asahi matrix defines `linux-asahi (7.3)` as stable in the downstream Asahi
 tree and expected to reach upstream by 7.3. It does not mean every platform
 feature is present in mainline 7.3. This checkpoint is time-sensitive and must
 be refreshed before selecting a later kernel or beginning subsystem work.
+
+## Source-head audit at 2026-09-03T10:28:45Z
+
+The release-facing source pins remain deliberate:
+
+- `AsahiLinux/linux:asahi` and `Moriz82/linux:asahi` both resolve to the pinned
+  `77cb8f24c2381a8abb7272d7bbdec548d6426a8a` baseline.
+- `AsahiLinux/m1n1:main` and `Moriz82/m1n1:main` both resolve to the pinned
+  `60e53e7078c5cb7efce32d64bf50829e9401e44f` baseline.
+- `asahi-alarm/PKGBUILDs:main` and `Moriz82/PKGBUILDs:main` both resolve to the
+  pinned `07b5b2d8fc7addf4625a5500365177eb88129b5b` baseline.
+- `AsahiLinux/linux:asahi-wip` resolves to
+  `ca9a850f237f98949996eefb8980371a5d58c886`. GitHub's comparison reports it
+  as 394 commits ahead and 47 behind the stable pin. Its history contains
+  explicit `WIP` and `DO NOT MERGE` commits plus merges of DCP, GPU, ISP, and
+  SPMI/Type-C topic branches. It is research input, not a release candidate.
+- `AsahiLinux/u-boot:asahi-releng` has moved to
+  `dbd2154cb0d3a5552505cfcc00a8b5f8da737030`, while the user fork and M0 remain
+  pinned at `3b233f59d0b6b57eae5add46a6fa7787ea11388e`. The newer history includes
+  Apple M3 Pro/Max and MTP work, but it is also based on a substantially newer
+  U-Boot line. It requires a separate isolated candidate build and review
+  before promotion; it does not invalidate the byte-reproducible M0 handoff.
+
+These checks prevent duplicate implementation and prevent an attractive but
+volatile topic aggregate from silently becoming the canonical source. They do
+not establish runtime hardware support.
