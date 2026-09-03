@@ -107,6 +107,49 @@ evidence_new_file() {
     (umask 077; : >"$file") || evidence_die "cannot create file: $file"
 }
 
+evidence_atomic_publish_directory() {
+    local source=$1 destination=$2
+    command -v python3 >/dev/null 2>&1 || evidence_die 'python3 is required for atomic output publication'
+    python3 - "$source" "$destination" <<'PY'
+import ctypes
+import os
+import platform
+import sys
+
+source, destination = (os.fsencode(value) for value in sys.argv[1:3])
+libc = ctypes.CDLL(None, use_errno=True)
+at_fdcwd = -100
+
+if sys.platform == "darwin":
+    function = getattr(libc, "renameatx_np", None)
+    if function is None:
+        print("atomic no-replace publish is unavailable: renameatx_np", file=sys.stderr)
+        raise SystemExit(1)
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    result = function(at_fdcwd, source, at_fdcwd, destination, 0x00000004)  # RENAME_EXCL
+else:
+    function = getattr(libc, "renameat2", None)
+    if function is not None:
+        function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        function.restype = ctypes.c_int
+        result = function(at_fdcwd, source, at_fdcwd, destination, 0x1)  # RENAME_NOREPLACE
+    else:
+        syscall_number = {"x86_64": 316, "amd64": 316, "aarch64": 276, "arm64": 276}.get(platform.machine().lower())
+        if syscall_number is None:
+            print("atomic no-replace publish is unavailable on this Linux architecture", file=sys.stderr)
+            raise SystemExit(1)
+        function = libc.syscall
+        function.restype = ctypes.c_long
+        result = function(syscall_number, at_fdcwd, source, at_fdcwd, destination, 0x1)  # RENAME_NOREPLACE
+
+if result != 0:
+    error = ctypes.get_errno()
+    print(f"atomic no-replace publish failed: [{error}] {os.strerror(error)}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 evidence_kv() {
     local file=$1 key=$2
     awk -v wanted="$key" '

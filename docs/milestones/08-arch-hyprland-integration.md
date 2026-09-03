@@ -35,6 +35,41 @@ build-system fingerprint, verifies the keyring package and each required
 Hyprland-side package, and records the upstream database policy without
 inventing a nonexistent database signature.
 
+`build-m8-signed-repo.sh` is a separate development-only path for the eight
+locally supplied closure packages. Run it in the pinned Arch Linux ARM image,
+give it an external GnuPG home and a full fingerprint, and keep that key home
+outside both the package input and output roots:
+
+```sh
+SOFTWARE_OUTPUT_ROOT=/absolute/output-root \
+./scripts/build-m8-signed-repo.sh \
+  --input-dir /absolute/package-input \
+  --gnupg-home /external/signing-home \
+  --signer FULL_FINGERPRINT \
+  --out /absolute/output-root/repository
+
+./scripts/verify-m8-signed-repo.sh \
+  --repo /absolute/output-root/repository \
+  --expected-signer FULL_FINGERPRINT
+```
+
+The builder signs every package, creates and signs `repo-add` database and
+files archives, exports only the minimal public certificate, verifies the
+staged repository, and publishes it with an atomic no-replace rename. The
+verifier needs no private key or writable keyring. It binds the repository to
+the caller-supplied full fingerprint, verifies all detached and embedded
+signatures, checks exact metadata and file inventories, rejects secret-key
+packets, and reuses the package-closure verifier. Run
+`tests/m8-signed-repo-self-test.sh` inside the pinned image for positive,
+public-key-only, tamper, key-substitution, secret-key, inventory, and builder
+failure cases.
+
+This signed repository remains `canonical=false`, `published=false`,
+`installed=false`, and `hardware_acceptance=false`. It includes only the
+current eight-package static closure, not the full platform package set or a
+second set of rollback package versions. It therefore closes signing-tooling
+coverage only; it does not satisfy the Milestone 8 exit.
+
 The closure follows the current target stack: Asahi ALARM provides its Apple
 GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering
 backend. The older `mesa-asahi-edge` and `wlroots` package requirements are not

@@ -5,47 +5,6 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 output_root=${SOFTWARE_OUTPUT_ROOT:-$project_root/out}
 forbidden_file="$project_root/config/milestone8-forbidden-vm-tokens.txt"
-atomic_publish_directory() {
-    local source=$1 destination=$2
-    python3 - "$source" "$destination" <<'PY'
-import ctypes
-import os
-import platform
-import sys
-
-source, destination = (os.fsencode(value) for value in sys.argv[1:3])
-libc = ctypes.CDLL(None, use_errno=True)
-at_fdcwd = -100
-
-if sys.platform == "darwin":
-    function = getattr(libc, "renameatx_np", None)
-    if function is None:
-        print("atomic no-replace publish is unavailable: renameatx_np", file=sys.stderr)
-        raise SystemExit(1)
-    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    function.restype = ctypes.c_int
-    result = function(at_fdcwd, source, at_fdcwd, destination, 0x00000004)  # RENAME_EXCL
-else:
-    function = getattr(libc, "renameat2", None)
-    if function is not None:
-        function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        function.restype = ctypes.c_int
-        result = function(at_fdcwd, source, at_fdcwd, destination, 0x1)  # RENAME_NOREPLACE
-    else:
-        syscall_number = {"x86_64": 316, "amd64": 316, "aarch64": 276, "arm64": 276}.get(platform.machine().lower())
-        if syscall_number is None:
-            print("atomic no-replace publish is unavailable on this Linux architecture", file=sys.stderr)
-            raise SystemExit(1)
-        function = libc.syscall
-        function.restype = ctypes.c_long
-        result = function(syscall_number, at_fdcwd, source, at_fdcwd, destination, 0x1)  # RENAME_NOREPLACE
-
-if result != 0:
-    error = ctypes.get_errno()
-    print(f"atomic no-replace publish failed: [{error}] {os.strerror(error)}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-}
 scan_forbidden_metadata() {
     local file=$1 token
     while IFS= read -r token || [[ -n $token ]]; do
@@ -104,7 +63,7 @@ before_coverage_hash=$(evidence_sha256 "$stage/before/coverage.tsv"); candidate_
 } > "$stage/transactions.tsv")
 evidence_write_sums "$stage" "$stage/SHA256SUMS"
 "$project_root/scripts/verify-m8-update-rollback.sh" --evidence "$stage" --anchor "$anchor" >/dev/null
-atomic_publish_directory "$stage" "$out"
+evidence_atomic_publish_directory "$stage" "$out"
 [[ -d $out && ! -L $out && ! -e $stage && ! -L $stage ]] || evidence_die 'published output is not exactly the verified stage'
 stage=
 printf 'rollback-evidence=%s\n' "$out"
