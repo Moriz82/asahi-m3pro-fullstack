@@ -16,6 +16,13 @@ artifacts. They do not download, install, sign, publish, boot, alter the host,
 or assert that Arch packages are currently available. The preview repository
 is deterministic evidence and is not a pacman repository for direct use.
 
+The closure follows the current target stack: Asahi ALARM provides its Apple
+GPU userspace as `mesa`, and current Hyprland uses `aquamarine` as its rendering
+backend. The older `mesa-asahi-edge` and `wlroots` package requirements are not
+part of this contract. `hyprpaper` is optional desktop decoration, so it is not
+required for the minimal tested compositor closure. Fixture versions exercise
+the verifier and update/rollback model; they are not an availability promise.
+
 `config/milestone8-platform-coverage.tsv` is the fixed coverage contract. It
 names every stack responsibility and keeps the native gate blocked:
 
@@ -44,10 +51,13 @@ files, and pacman lifecycle hook paths under `usr/share/libalpm/hooks/` or
 packages, including the pinned M0 kernel headers, require them. Archive-member
 validation requires `bsdtar`. Forbidden archive paths are matched as complete
 path components, so generic kernel interfaces such as `qemu_fw_cfg.h` and
-`virtio.h` do not falsely identify a package as VM-specific. Executable paths
-also reject forbidden-name prefixes such as `qemu-system-aarch64`. Package
-names, artifact names, metadata, and dependencies retain case-insensitive
-substring checks. `build-m8-unsigned-repo.sh`
+`virtio.h`, and unused Mesa modules such as `swrast_dri.so` or
+`virtio_gpu_dri.so`, do not falsely identify a package as VM-specific.
+Executable paths still reject forbidden-name prefixes such as
+`qemu-system-aarch64`. Package names, artifact names, metadata, and dependencies
+retain case-insensitive substring checks. Package contents establish closure,
+not the active GPU path; the native M4 renderer gate must independently prove
+an Apple/AGX renderer and reject software rendering. `build-m8-unsigned-repo.sh`
 copies verified inputs and the byte-identical coverage contract into a new
 output directory and writes unsigned manifest/checksum metadata only.
 

@@ -1,4 +1,7 @@
-# Case-insensitive tokens that invalidate a package closure or preview repo.
+# Case-insensitive tokens that invalidate package names, metadata, dependencies,
+# exact archive path components, target executable prefixes, or preview metadata.
+# Generic headers and unused Mesa driver modules may contain these strings; the
+# native M4 renderer gate proves which driver is active.
 qemu
 virtio
 virgl

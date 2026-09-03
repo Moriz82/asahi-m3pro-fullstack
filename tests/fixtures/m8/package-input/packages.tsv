@@ -1,10 +1,9 @@
 package	version	architecture	sha256	artifact
 linux-asahi	7.1.9.asahi1-1	aarch64	233d4908bf004e10cd2408016728dbdc5a8b0c55f10760a15674660e7c924049	linux-asahi-7.1.9.asahi1-1-aarch64.pkg.tar.zst
 linux-asahi-headers	7.1.9.asahi1-1	aarch64	62f1d7dff9555b00492a870e174ee3bff20c91ab3e112f3963e623f9d44d1cf9	linux-asahi-headers-7.1.9.asahi1-1-aarch64.pkg.tar.zst
-mesa-asahi-edge	25.2.0-1	aarch64	b7bfccf5f639dd6031746101a72864ebe9da4065fce46d8c8fbc813e926ae7bb	mesa-asahi-edge-25.2.0-1-aarch64.pkg.tar.zst
-wlroots	0.18.2-1	aarch64	4db5b62c881a470f6f2421f1530f77edb2faa4d236f3c37f67ee6094865776f6	wlroots-0.18.2-1-aarch64.pkg.tar.zst
-hyprland	0.52.1-1	aarch64	c6a3e2e42695177dfd6c64fab8b648d6c3c6c5b3cc32e14b0db50bc7b3388255	hyprland-0.52.1-1-aarch64.pkg.tar.zst
-hyprpaper	0.7.5-1	aarch64	cdeb7f411c4a8ab2e6b1c2ccb9101c65fc5a3f8501c77b38352263ed3a52ef80	hyprpaper-0.7.5-1-aarch64.pkg.tar.zst
-xdg-desktop-portal-hyprland	1.3.10-1	aarch64	72b4ef50010b239f343beaa53cc965a0f839d13bc9d6e36e5e7768aa2b01c9ec	xdg-desktop-portal-hyprland-1.3.10-1-aarch64.pkg.tar.zst
-libinput	1.28.1-1	aarch64	15c59a3521401ad54f689994a6a50c3985842affacccb6a74fa9b79ddcf4f6a6	libinput-1.28.1-1-aarch64.pkg.tar.zst
-wayland	1.23.1-1	aarch64	187bfa0759c2028f20f8d660e7bff9e8c30316f8984bdf7fb6e308322f0dd1bf	wayland-1.23.1-1-aarch64.pkg.tar.zst
+mesa	26.1.8-1	aarch64	200b5c243f63618ae90e9581126f4be106269d68d1f4c5b39991960363788598	mesa-26.1.8-1-aarch64.pkg.tar.zst
+aquamarine	0.14.0-2	aarch64	c33d5fe3304869bf9c289a10ddef88c911068c4574baa55a52fe7971150d5c36	aquamarine-0.14.0-2-aarch64.pkg.tar.zst
+hyprland	0.56.1-3	aarch64	f4d7f0b66662b334651a1d8164b5aa81e64c6381551932683b9a8a8f4e924f4f	hyprland-0.56.1-3-aarch64.pkg.tar.zst
+xdg-desktop-portal-hyprland	1.4.1-1	aarch64	e3dd13c66446bc0e0073936c5e234ef12a201e07a5ad225f1f6faccf8cb4155b	xdg-desktop-portal-hyprland-1.4.1-1-aarch64.pkg.tar.zst
+libinput	1.31.3-1	aarch64	696e7743f4a2db136e201c81e26a7e393337bbd9a2e246c9bc83338860917f3a	libinput-1.31.3-1-aarch64.pkg.tar.zst
+wayland	1.26.0-1	aarch64	0339a3d644a790acaecf60c184ac35e8be2645c568a1678de7bbfc6018ebef2d	wayland-1.26.0-1-aarch64.pkg.tar.zst
