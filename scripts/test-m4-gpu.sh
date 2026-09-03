@@ -25,4 +25,22 @@ expect_fail "$project_root/scripts/collect-m4-gpu.sh" --dry-run --input-dir "$so
 short="$tmp/short"; make_input "$short" 'Apple AGX' 86399
 short_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m4-short.XXXXXX"); rmdir "$short_out"
 expect_fail "$project_root/scripts/collect-m4-gpu.sh" --dry-run --input-dir "$short" --out "$short_out"
+reject_mutation() {
+    local name=$1 file=$2 expression=$3 candidate="$tmp/$1" candidate_out
+    cp -R "$valid" "$candidate"
+    sed -i.bak "$expression" "$candidate/$file"
+    rm -f "$candidate/$file.bak"
+    candidate_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m4-$name.XXXXXX")
+    rmdir "$candidate_out"
+    expect_fail "$project_root/scripts/collect-m4-gpu.sh" --dry-run --input-dir "$candidate" --out "$candidate_out"
+}
+reject_mutation unstructured-renderer renderer.txt 's/^renderer=/note=/'
+reject_mutation conformance-claim conformance.tsv '2s/planned/passed/'
+reject_mutation reset-claim reset-recovery.txt 's/reset=planned/reset=success/'
+duplicate_renderer="$tmp/duplicate-renderer"
+cp -R "$valid" "$duplicate_renderer"
+printf 'renderer=Apple AGX\n' >> "$duplicate_renderer/renderer.txt"
+duplicate_renderer_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m4-duplicate-renderer.XXXXXX")
+rmdir "$duplicate_renderer_out"
+expect_fail "$project_root/scripts/collect-m4-gpu.sh" --dry-run --input-dir "$duplicate_renderer" --out "$duplicate_renderer_out"
 printf 'M4-tests=passed\n'

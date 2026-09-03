@@ -1,0 +1,10 @@
+# format=1
+# target=Mac15,6/J514s/T6030
+# source_tree_commit=3502c22e0aa9698a18793a5db1f2d2f23c74b77b
+# Static source contract only. Matching these bytes is not hardware acceptance.
+
+579340785904db7b4fac708a9c761b035e32d7c8af6d6b5d32175e523a39359d  drivers/gpu/drm/asahi/Kconfig
+2e0e1fe5948c4db5fc77b541300aafbc99f02b949100e27a74610edc942b0c0a  drivers/gpu/drm/asahi/Makefile
+7a81fbdbd582edff0d30346576d98d842a18977489300ac395928aab8b589a36  drivers/gpu/drm/asahi/driver.rs
+180e48d6ad53349baa59ef34142bc10550fdde1494c86f631866470c9462717d  drivers/gpu/drm/asahi/gpu.rs
+a95fceff7e41563a7aa0b2365c6e39488e2d4f828c0a20bc2b888b0cb4b1185f  drivers/gpu/drm/asahi/hw/mod.rs

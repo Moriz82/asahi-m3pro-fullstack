@@ -368,18 +368,35 @@ evidence_validate_m3() {
 }
 
 evidence_validate_m4() {
-    local root=$1
+    local root=$1 renderer reset recovery
     evidence_validate_identity "$root/identity.txt"
     evidence_require_clean_log "$root/kernel.log"
-    grep -Eiq 'Apple|AGX' "$root/renderer.txt" || evidence_die 'renderer does not declare Apple/AGX'
-    grep -Eiq 'llvmpipe|softpipe|software[[:space:]_-]*raster|swrast|software renderer' "$root/renderer.txt" && evidence_die 'software renderer is not accepted'
-    evidence_validate_tsv "$root/conformance.tsv" api 0
-    evidence_validate_no_bare_pass "$root/conformance.tsv"
+    evidence_abs_regular "$root/renderer.txt"
+    renderer=$(evidence_kv "$root/renderer.txt" renderer)
+    [[ $renderer =~ Apple|AGX ]] || evidence_die 'renderer does not declare Apple/AGX'
+    [[ ! $renderer =~ [Ll][Ll][Vv][Mm][Pp][Ii][Pp][Ee]|[Ss][Oo][Ff][Tt][Pp][Ii][Pp][Ee]|[Ss][Ww][Rr][Aa][Ss][Tt]|[Ss][Oo][Ff][Tt][Ww][Aa][Rr][Ee][[:space:]_-]*[Rr][Aa][Ss][Tt][Ee][Rr] ]] || evidence_die 'software renderer is not accepted'
+    evidence_validate_tsv "$root/conformance.tsv" 'api status note' 0
+    awk -F '\t' '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "api") { api_index = i; api_found++ }
+                if ($i == "status") { status_index = i; status_found++ }
+            }
+            if (api_found != 1 || status_found != 1) invalid = 1
+            next
+        }
+        NF > 0 {
+            api = $api_index
+            status = $status_index
+            if (++seen[api] != 1 || status !~ /^(planned|not-run|blocked)$/) invalid = 1
+        }
+        END { exit invalid || seen["OpenGL"] != 1 || seen["Vulkan"] != 1 }
+    ' "$root/conformance.tsv" || evidence_die 'invalid software-plan conformance records'
     evidence_validate_stress_tsv "$root/stress.tsv" 86400
     evidence_abs_regular "$root/reset-recovery.txt"
-    grep -Eiq 'reset' "$root/reset-recovery.txt" || evidence_die 'reset evidence missing'
-    grep -Eiq 'recover' "$root/reset-recovery.txt" || evidence_die 'recovery evidence missing'
-    evidence_validate_no_bare_pass "$root/reset-recovery.txt"
+    reset=$(evidence_kv "$root/reset-recovery.txt" reset)
+    recovery=$(evidence_kv "$root/reset-recovery.txt" recovery)
+    [[ $reset =~ ^(planned|not-run|blocked)$ && $recovery =~ ^(planned|not-run|blocked)$ ]] || evidence_die 'invalid software-plan reset/recovery records'
 }
 
 evidence_scan_fault_log() {
