@@ -9,6 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV PATH=/root/.cargo/bin:${PATH}
+ENV LIBCLANG_PATH=/usr/lib/llvm-15/lib
 
 RUN test -n "${DEBIAN_SNAPSHOT}" \
     && sed -i \
@@ -24,6 +25,8 @@ RUN test -n "${DEBIAN_SNAPSHOT}" \
         bison \
         build-essential \
         ca-certificates \
+        clang \
+        clang-15 \
         curl \
         device-tree-compiler \
         file \
@@ -31,12 +34,35 @@ RUN test -n "${DEBIAN_SNAPSHOT}" \
         gcc-aarch64-linux-gnu \
         git \
         libc6-dev-arm64-cross \
+        libarchive-tools \
+        libclang-dev \
+        libclang-15-dev \
+        libdw-dev \
+        libelf-dev \
         libgnutls28-dev \
         libssl-dev \
+        llvm \
+        llvm-15 \
+        kmod \
         locales \
+        pacman-package-manager \
+        pahole \
+        python3-pip \
+        python3-venv \
+        python3-yaml \
+        python3-jsonschema \
+        python3-libfdt \
+        yamllint \
+        rsync \
         python3 \
+        python3-dev \
         python3-pyelftools \
         python3-setuptools \
+        zstd \
+        cpio \
+        perl \
+        xz-utils \
+        jq \
         swig \
     && rm -rf /var/lib/apt/lists/* \
     && localedef -i en_US -c -f UTF-8 en_US.UTF-8 \
@@ -47,7 +73,16 @@ RUN test -n "${DEBIAN_SNAPSHOT}" \
     && chmod 0755 /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_VERSION}" \
         --target aarch64-unknown-none-softfloat \
-    && rm -f /tmp/rustup-init
+    && rustup component add rust-src \
+    && rustup component add rustfmt \
+    && rm -f /tmp/rustup-init \
+    && cargo install --locked --version 0.72.1 bindgen-cli
 
 LABEL org.opencontainers.image.title="M3 Pro Milestone 0 builder"
 WORKDIR /workspace
+
+COPY dtschema-requirements.txt /tmp/dtschema-requirements.txt
+
+RUN python3 -m pip install --break-system-packages --only-binary=:all: \
+        --require-hashes --no-deps --no-cache-dir \
+        -r /tmp/dtschema-requirements.txt

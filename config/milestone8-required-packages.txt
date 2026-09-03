@@ -1,0 +1,11 @@
+# Milestone 8 software-only package closure.
+# Format: package<TAB>role. This is a contract, not a claim of availability.
+linux-asahi	kernel
+linux-asahi-headers	kernel-headers
+mesa-asahi-edge	apple-gpu-userspace
+wlroots	wayland-compositor-library
+hyprland	compositor
+hyprpaper	compositor-support
+xdg-desktop-portal-hyprland	portal
+libinput	input
+wayland	wayland-protocol

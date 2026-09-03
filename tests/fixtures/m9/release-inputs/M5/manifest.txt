@@ -1,0 +1,9 @@
+milestone=M5
+model=Mac15,6
+board=J514s
+soc=T6030
+hardware_acceptance=false
+native_readiness=false
+backup_recovery=false
+dfu=false
+dedicated_hardware=false

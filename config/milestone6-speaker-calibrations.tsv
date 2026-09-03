@@ -1,0 +1,2 @@
+# Repository-reviewed production allowlist. Empty means internal speakers remain disabled.
+board	calibration_sha256

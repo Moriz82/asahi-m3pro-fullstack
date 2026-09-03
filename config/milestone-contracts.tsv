@@ -1,0 +1,11 @@
+milestone	predecessor	document	verifier	handoff
+M0	none	docs/milestones/00-reproducible-baseline.md	scripts/verify-milestone0.sh	scripts/create-milestone-handoff.sh
+M1	M0	docs/milestones/01-controlled-tethered-boot.md	scripts/verify-milestone1-session.sh	scripts/create-milestone-handoff.sh
+M2	M1	docs/milestones/02-core-power.md	scripts/verify-m2-core-power.sh	scripts/create-milestone-handoff.sh
+M3	M2	docs/milestones/03-display-dcp.md	scripts/verify-m3-display-dcp.sh	scripts/create-milestone-handoff.sh
+M4	M3	docs/milestones/04-gpu.md	scripts/verify-m4-gpu.sh	scripts/create-milestone-handoff.sh
+M5	M4	docs/milestones/05-ports.md	scripts/verify-m5-ports.sh	scripts/create-milestone-handoff.sh
+M6	M5	docs/milestones/06-media-camera-audio.md	scripts/verify-m6-media-audio.sh	scripts/create-milestone-handoff.sh
+M7	M6	docs/milestones/07-security-accelerators.md	scripts/verify-m7-security.sh	scripts/create-milestone-handoff.sh
+M8	M7	docs/milestones/08-arch-hyprland-integration.md	scripts/verify-m8-update-rollback.sh	scripts/create-milestone-handoff.sh
+M9	M8	docs/milestones/09-installer-release.md	scripts/validate-m9-release-inputs.sh	terminal

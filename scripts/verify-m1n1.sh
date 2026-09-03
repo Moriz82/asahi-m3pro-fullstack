@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
-readonly evidence="${1:-${project_root}/out/milestone0/m1n1/latest}"
+source "${project_root}/scripts/lib/milestone0-output-root.sh"
+m0_validate_output_root "$project_root"
+readonly evidence="${1:-${MILESTONE0_OUTPUT_ROOT}/milestone0/m1n1/latest}"
 
 test -d "$evidence"
 for required in SHA256SUMS build.log file.txt m1n1.bin m1n1.macho manifest.txt packages.txt submodules.txt; do
@@ -26,6 +28,7 @@ grep -Fx "upstream_ref=${M1N1_UPSTREAM_REF}" "${evidence}/manifest.txt" >/dev/nu
 grep -Fx "upstream_commit=${M1N1_UPSTREAM_COMMIT}" "${evidence}/manifest.txt" >/dev/null
 grep -Fx "artwork_commit=${M1N1_ARTWORK_COMMIT}" "${evidence}/manifest.txt" >/dev/null
 grep -Fx "source_clean=true" "${evidence}/manifest.txt" >/dev/null
+grep -Eq '^source_date_epoch=[0-9]+$' "${evidence}/manifest.txt"
 grep -Eq '^workspace_filesystem=(ext2/ext3|ext2|ext3|ext4|xfs|btrfs|overlayfs)$' \
     "${evidence}/manifest.txt"
 grep -Eq '^container_image_id=sha256:[0-9a-f]{64}$' "${evidence}/manifest.txt"

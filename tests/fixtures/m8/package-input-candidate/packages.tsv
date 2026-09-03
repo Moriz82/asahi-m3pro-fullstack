@@ -1,0 +1,10 @@
+package	version	architecture	sha256	artifact
+linux-asahi	7.1.9.asahi1-2	aarch64	0bd2e272f006a5635408d2b9259a393770b38230690883a6c7a759d15b584d68	linux-asahi-7.1.9.asahi1-2-aarch64.pkg.tar.zst
+linux-asahi-headers	7.1.9.asahi1-2	aarch64	c991c61093c8434e84178c7574cd1dd97d671646a0ff7e7e9dd4bd04f0063f48	linux-asahi-headers-7.1.9.asahi1-2-aarch64.pkg.tar.zst
+mesa-asahi-edge	25.2.0-2	aarch64	8937b78f2553c1763e296bd8ffc1d1223a4006dfec3c1ed04c72a39fd855f8c4	mesa-asahi-edge-25.2.0-2-aarch64.pkg.tar.zst
+wlroots	0.18.2-2	aarch64	f69aca38155b360980997be61e49d8c1940ded1597d6ebf5f522704e203372df	wlroots-0.18.2-2-aarch64.pkg.tar.zst
+hyprland	0.52.1-2	aarch64	a602a76fd255a549778dc575ddae0a3c1c73f38f5ab604bbebb3ffd61e17b791	hyprland-0.52.1-2-aarch64.pkg.tar.zst
+hyprpaper	0.7.5-2	aarch64	5e94086c9f4bde71fea120951f81f705b66bd8f84b4a0dd03f72c03edbd89cf5	hyprpaper-0.7.5-2-aarch64.pkg.tar.zst
+xdg-desktop-portal-hyprland	1.3.10-2	aarch64	d110c74bf1b322c62e2ac84b140ebf00ab67cec919d48e69add52c2c015dbd54	xdg-desktop-portal-hyprland-1.3.10-2-aarch64.pkg.tar.zst
+libinput	1.28.1-2	aarch64	1e00e4942717ae5481ff608557776be202e07c8aa1cf7198fe94acf8101ec665	libinput-1.28.1-2-aarch64.pkg.tar.zst
+wayland	1.23.1-2	aarch64	e236f0bb8a5a26b8e14b07954b48ad9d33e52adcdd119e60c073e68774d1d77a	wayland-1.23.1-2-aarch64.pkg.tar.zst

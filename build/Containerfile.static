@@ -1,0 +1,27 @@
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+ARG DEBIAN_SNAPSHOT=20260824T000000Z
+
+# Architecture-neutral static tooling image. The checkout is supplied read-only
+# at runtime; scripts write only to the caller-provided disposable /tmp root.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+ && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
+ && apt-get install --no-install-recommends -y \
+      bash=5.2.15-2+b13 \
+      binutils=2.40-2 \
+      cpio=2.13+dfsg-7.1 \
+      file=1:5.44-3 \
+      git=1:2.39.5-0+deb12u3 \
+      gawk=1:5.2.1-2 \
+      gzip=1.12-1 \
+      libarchive-tools=3.6.2-1+deb12u4 \
+      libdigest-sha-perl=6.04-1 \
+      python3=3.11.2-1+b1 \
+      shellcheck=0.9.0-1 \
+      tar=1.34+dfsg-1.2+deb12u1 \
+      zstd=1.5.4+dfsg2-5 \
+ && ln -sf /usr/bin/gawk /usr/local/bin/awk \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+ENTRYPOINT ["/bin/bash"]

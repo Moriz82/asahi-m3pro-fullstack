@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: M3 Pro Linux downstream <m3pro-linux@localhost>
+Date: Wed, 2 Sep 2026 12:00:00 -0500
+Subject: [PATCH] dt-bindings: apple: fix schema lint failures
+
+Constrain Apple PCIe root-port child nodes after inheriting the common PCI
+bus schema, and remove the extra blank line from the Apple SMC hwmon
+binding. This keeps the downstream unfiltered binding check clean without
+weakening validation.
+
+Signed-off-by: M3 Pro Linux downstream <m3pro-linux@localhost>
+---
+ .../devicetree/bindings/hwmon/apple,smc-hwmon.yaml       | 1 -
+ Documentation/devicetree/bindings/pci/apple,pcie.yaml    | 2 ++
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml b/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
+--- a/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
++++ b/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
+@@ -70,7 +70,6 @@ patternProperties:
+         pattern: "^[A-Za-z0-9]{4}$"
+         description: Writeable key to enable/disable manual fan control
+ 
+-
+   "^power-[A-Za-z0-9]{4}$":
+     $ref: "#/$defs/sensor"
+     unevaluatedProperties: false
+diff --git a/Documentation/devicetree/bindings/pci/apple,pcie.yaml b/Documentation/devicetree/bindings/pci/apple,pcie.yaml
+--- a/Documentation/devicetree/bindings/pci/apple,pcie.yaml
++++ b/Documentation/devicetree/bindings/pci/apple,pcie.yaml
+@@ -106,6 +106,8 @@ patternProperties:
+       - interrupt-map-mask
+       - interrupt-map
+ 
++    unevaluatedProperties: false
++
+ required:
+   - compatible
+   - reg
+-- 
+2.55.0
+

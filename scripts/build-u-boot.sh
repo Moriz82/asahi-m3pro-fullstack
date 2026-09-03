@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
+readonly source_volume="${SOURCE_VOLUME_OVERRIDE:-${SOURCE_VOLUME}}"
+source "${project_root}/scripts/lib/milestone0-output-root.sh"
+m0_validate_output_root "$project_root"
+readonly output_root="$MILESTONE0_OUTPUT_ROOT"
 
 for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME UBOOT_URL UBOOT_REF UBOOT_COMMIT UBOOT_DEFCONFIG UBOOT_UPSTREAM_URL UBOOT_UPSTREAM_REF UBOOT_UPSTREAM_COMMIT; do
     test -n "${!value:-}" || {
@@ -17,7 +21,7 @@ done
 command -v docker >/dev/null
 docker info >/dev/null
 
-readonly cache_dir="${project_root}/out/cache"
+readonly cache_dir="${output_root}/cache"
 readonly mirror="${cache_dir}/u-boot.git"
 readonly bundle="${cache_dir}/u-boot.bundle"
 mkdir -p "$cache_dir"
@@ -53,7 +57,7 @@ docker build \
     --tag "$BUILD_IMAGE" \
     "${project_root}/build"
 
-test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}' "$SOURCE_VOLUME")" = \
+test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}' "$source_volume")" = \
     asahi-m3pro-fullstack
 readonly image_id="$(docker image inspect --format '{{.Id}}' "$BUILD_IMAGE")"
 
@@ -71,10 +75,12 @@ docker run --rm \
     --env "UBOOT_UPSTREAM_REF=${UBOOT_UPSTREAM_REF}" \
     --env "UBOOT_UPSTREAM_URL=${UBOOT_UPSTREAM_URL}" \
     --mount "type=bind,src=${bundle},dst=/inputs/u-boot.bundle,readonly" \
-    --mount "type=volume,src=${SOURCE_VOLUME},dst=/workspace" \
-    --mount "type=bind,src=${project_root}/out,dst=/out" \
+    --mount "type=volume,src=${source_volume},dst=/workspace" \
+    --mount "type=bind,src=${output_root},dst=/out" \
     "$BUILD_IMAGE" \
     bash -Eeuo pipefail -c '
+        exec 9>/workspace/.milestone0-build.lock
+        flock -n 9 || { printf "Another Milestone 0 build owns the source volume\n" >&2; exit 1; }
         readonly repository=/workspace/src/u-boot
         readonly component_build=/workspace/build/u-boot
         readonly filesystem_type="$(stat -f -c %T /workspace)"
@@ -116,10 +122,17 @@ docker run --rm \
         export KBUILD_BUILD_USER=builder
         export SOURCE_DATE_EPOCH="$source_epoch"
 
-        readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+        readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N8 -tx1 /dev/urandom | tr -d "[:space:]")"
         readonly stage="/out/milestone0/u-boot/.${run_id}.tmp"
         readonly destination="/out/milestone0/u-boot/${run_id}"
-        install -d "$stage"
+        readonly latest="/out/milestone0/u-boot/latest"
+        readonly latest_tmp="/out/milestone0/u-boot/.latest.${run_id}.tmp"
+        if [[ -e "$stage" || -L "$stage" || -e "$destination" || -L "$destination" || -e "$latest_tmp" || -L "$latest_tmp" ]] ||
+            [[ -e "$latest" && ! -L "$latest" ]]; then
+            printf "Refusing colliding u-boot publication path for run %s\n" "$run_id" >&2
+            exit 1
+        fi
+        mkdir "$stage"
 
         LC_ALL=C make -C "$repository" O="$component_build" \
             CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" \
@@ -170,8 +183,9 @@ docker run --rm \
         )
 
         mv "$stage" "$destination"
-        ln -sfn "$run_id" /out/milestone0/u-boot/latest
+        ln -s "$run_id" "$latest_tmp"
+        mv -Tf "$latest_tmp" "$latest"
         printf "u-boot.baseline=%s\n" "$destination"
     '
 
-"${project_root}/scripts/verify-u-boot.sh"
+"${project_root}/scripts/verify-u-boot.sh" "${output_root}/milestone0/u-boot/latest"

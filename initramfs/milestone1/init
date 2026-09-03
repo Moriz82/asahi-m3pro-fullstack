@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+PATH=/bin:/sbin
+export PATH
+LOG=/run/milestone1/session.log
+gate_failed=false
+mkdir -p /run/milestone1
+touch "$LOG"
+
+log() {
+	line="M1 $(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"
+	printf '%s\n' "$line" >>"$LOG"
+	printf '%s\n' "$line" >/dev/console 2>/dev/null || true
+}
+
+mount_ram() {
+	mountpoint="$1"
+	fstype="$2"
+	mkdir -p "$mountpoint"
+	mount -t "$fstype" "$fstype" "$mountpoint" 2>/dev/null || log "mount_failed type=$fstype path=$mountpoint"
+}
+
+mount_ram /proc proc
+mount_ram /sys sysfs
+mount_ram /run tmpfs
+mkdir -p /dev
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || log 'mount_failed type=devtmpfs path=/dev'
+
+log 'phase=initramfs-start storage_policy=ram-only'
+log "uname=$(uname -a 2>/dev/null || printf unknown)"
+if [ -r /proc/cmdline ]; then
+	cmdline=$(cat /proc/cmdline)
+	log "cmdline=$cmdline"
+	case " $cmdline " in
+		*' root='*) log 'gate_failed=forbidden-root-parameter'; gate_failed=true ;;
+		*) ;;
+	esac
+	case " $cmdline " in
+		*NVMe*|*nvme*|*APFS*|*apfs*) log 'gate_failed=forbidden-persistent-storage-parameter'; gate_failed=true ;;
+		*) ;;
+	esac
+fi
+
+if [ "$gate_failed" = true ]; then
+	log 'phase=safe-halt reason=forbidden-command-line'
+	while :; do sleep 1; done
+fi
+
+if command -v dmesg >/dev/null 2>&1; then
+	dmesg > /run/milestone1/dmesg-start.log 2>&1 || true
+fi
+log 'phase=controlled-tether-ready action=none'
+log 'safe-test-preparation=watchdog/panic/reboot are observation-only; no fault is triggered'
+
+case "${M1_TEST_ACTION:-none}" in
+	none) ;;
+	prepare-watchdog) log 'prepared=watchdog observation; operator must trigger externally' ;;
+	prepare-panic) log 'prepared=panic observation; operator must trigger externally' ;;
+	prepare-reboot) log 'prepared=reboot observation; operator must trigger externally' ;;
+	*) log 'gate_failed=unknown-test-action' ;;
+esac
+
+while :; do
+	sleep 1
+done

@@ -1,0 +1,29 @@
+name: static software tooling
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build pinned static tooling image
+        run: |
+          docker build --pull=false -f build/Containerfile.static -t asahi-m3pro-static:ci .
+      - name: Run static aggregate
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:rw,nosuid,exec,size=1g \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            --entrypoint /bin/bash asahi-m3pro-static:ci -lc '
+              TEST_OUTPUT_ROOT=/tmp/asahi-static/tests \
+              MILESTONE_EVIDENCE_ROOT=/tmp/asahi-static/milestones \
+              RE_EVIDENCE_ROOT=/tmp/asahi-static/re \
+              MILESTONE_HANDOFF_ROOT=/tmp/asahi-static/handoffs \
+                ./scripts/verify-all-software-tooling.sh --static
+            '

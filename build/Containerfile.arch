@@ -1,0 +1,102 @@
+FROM docker.io/menci/archlinuxarm@sha256:55b83fc04a09f1e2e08644b4548b95c974ed1108fa8f0a34647af36a4b1c7f60
+
+ARG BC_VERSION=1.08.2-1
+ARG RSYNC_VERSION=3.5.0-1
+ARG PAHOLE_VERSION=1:1.31-2
+ARG RUST_VERSION
+ARG RUSTUP_VERSION
+ARG RUSTUP_INIT_SHA256
+
+# Docker Desktop does not expose Landlock. These settings are local to this
+# disposable packaging container and do not alter the host or source volume.
+RUN sed -i \
+        -e 's/^#DisableSandboxFilesystem/DisableSandboxFilesystem/' \
+        -e 's/^#DisableSandboxSyscalls/DisableSandboxSyscalls/' \
+        /etc/pacman.conf \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/bc.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/bc-1.08.2-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rsync.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/rsync-3.5.0-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/pahole.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/pahole-1%3A1.31-2-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/clang.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/clang-22.1.8-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/compiler-rt.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/compiler-rt-22.1.8-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/dtc.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/dtc-1%3A1.8.1-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/libedit.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/core/libedit-20260512_3.1-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/libyaml.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/libyaml-0.2.5-3-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/llvm-libs.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/llvm-libs-22.1.8-2-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/git.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/git-2.55.0-1-aarch64.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/perl-error.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/perl-error-0.17030-3-any.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/perl-mailtools.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/perl-mailtools-2.22-3-any.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/perl-timedate.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/perl-timedate-2.35-1-any.pkg.tar.xz \
+    && curl --proto '=https' --tlsv1.2 -fsSLo /tmp/zlib-ng.pkg.tar.xz \
+        https://fl.us.mirror.archlinuxarm.org/aarch64/extra/zlib-ng-2.3.3-1-aarch64.pkg.tar.xz \
+    && printf '%s  %s\n' \
+        46eb4cdf9e195db632780ca4185c686dd7acb37699b4b7ee35c3e8244100d354 /tmp/bc.pkg.tar.xz \
+        490a2f98f26a09f55b4471f119ada64ecf1d240c0fed63752c6f8683239fbb8f /tmp/rsync.pkg.tar.xz \
+        d9aa45da6e009f655a528faca1bcd9eab4e1ab521a9e467476aae8d32bbc087b /tmp/pahole.pkg.tar.xz \
+        b5105c12d606bbd92d69af34d37400e3479b2ee7ff528b1bb97023271402ef3b /tmp/clang.pkg.tar.xz \
+        f6d34a77c978405d053311b89c3576ae6ce7e5b5f736f2526b76f9415ea43845 /tmp/compiler-rt.pkg.tar.xz \
+        c60faaee0f149ef74fc9feb9aba5cc564d971e021c5bff523568ae0fb257a319 /tmp/dtc.pkg.tar.xz \
+        9900ef2ce4c8bddc1066a89951ff0e0dead005f168a9ac402ac487047961f2e5 /tmp/libedit.pkg.tar.xz \
+        f96d25c8898b27d3364034336630363bcf48eb968c90d5d5c240e4b237ae153b /tmp/libyaml.pkg.tar.xz \
+        f3119b25813452a1cddd84ea985d7d76d9da41201b39e82f15cf23c2d3ed348e /tmp/llvm-libs.pkg.tar.xz \
+        fb1f7b2598b96c7ce5ea41d23977243e5a67189eda1826dd7690977fd652c11a /tmp/git.pkg.tar.xz \
+        45e48cf1eac8c7ee4f78656e3eec0df2aae9fa75aa924367abc20c2270ec54db /tmp/perl-error.pkg.tar.xz \
+        71b6383a6dab51efe4be74d14a8ea7bcdb07a34a20da7c2c6f708c4a01257018 /tmp/perl-mailtools.pkg.tar.xz \
+        d97a4a2b169a88fbb2db3dc5425eba2b31b58ab4123a1a998c2fcc718cd8251b /tmp/perl-timedate.pkg.tar.xz \
+        1ee3a19d58b27a1f63d455177be5301ca474ed20d3699ffc7f0a4f987852e930 /tmp/zlib-ng.pkg.tar.xz \
+        | sha256sum -c - \
+    && pacman -U --noconfirm /tmp/bc.pkg.tar.xz /tmp/rsync.pkg.tar.xz /tmp/pahole.pkg.tar.xz \
+        /tmp/clang.pkg.tar.xz /tmp/compiler-rt.pkg.tar.xz /tmp/dtc.pkg.tar.xz \
+        /tmp/libedit.pkg.tar.xz /tmp/libyaml.pkg.tar.xz /tmp/llvm-libs.pkg.tar.xz \
+        /tmp/git.pkg.tar.xz /tmp/perl-error.pkg.tar.xz /tmp/perl-mailtools.pkg.tar.xz \
+        /tmp/perl-timedate.pkg.tar.xz /tmp/zlib-ng.pkg.tar.xz \
+    && pacman -Q base-devel tar zstd kmod cpio python bison flex gettext libelf openssl bc rsync pahole \
+        clang compiler-rt dtc git libedit libyaml llvm-libs \
+        > /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'bc 1.08.2-1' /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'rsync 3.5.0-1' /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'pahole 1:1.31-2' /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'clang 22.1.8-1' /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'dtc 1:1.8.1-1' /etc/milestone0-arch-packages.txt \
+    && grep -Fx 'git 2.55.0-1' /etc/milestone0-arch-packages.txt \
+    && pacman -Scc --noconfirm \
+    && rm -f /tmp/*.pkg.tar.xz \
+    && useradd --create-home --shell /bin/bash makepkg
+
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+ENV PATH=/opt/cargo/bin:/opt/dtschema/bin:${PATH}
+ENV LIBCLANG_PATH=/usr/lib
+WORKDIR /workspace
+
+COPY dtschema-requirements.txt /tmp/dtschema-requirements.txt
+
+RUN test -n "${RUST_VERSION}" \
+    && test -n "${RUSTUP_VERSION}" \
+    && test -n "${RUSTUP_INIT_SHA256}" \
+    && curl --proto '=https' --tlsv1.2 -fsSL \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-unknown-linux-gnu/rustup-init" \
+        -o /tmp/rustup-init \
+    && printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" /tmp/rustup-init | sha256sum -c - \
+    && chmod 0755 /tmp/rustup-init \
+    && install -d -m 0755 "${RUSTUP_HOME}" "${CARGO_HOME}" \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+        --target aarch64-unknown-none-softfloat \
+    && rustup component add rust-src rustfmt \
+    && cargo install --locked --version 0.72.1 bindgen-cli \
+    && python -m venv --system-site-packages /opt/dtschema \
+    && /opt/dtschema/bin/pip install --only-binary=:all: --require-hashes --no-deps --no-cache-dir \
+        -r /tmp/dtschema-requirements.txt \
+    && rm -f /tmp/rustup-init

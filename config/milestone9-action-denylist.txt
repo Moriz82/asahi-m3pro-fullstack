@@ -1,0 +1,23 @@
+# Tokens and action names that may never appear in an M9 record.
+diskutil
+partition
+apfs
+bless
+bputil
+nvram
+firmware
+startup
+reboot
+native-install
+execute-install
+modify-container
+existing-container
+remove-macos
+erase-macos
+mount
+umount
+systemctl
+chroot
+ssh
+curl
+wget

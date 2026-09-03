@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
-readonly evidence="${1:-${project_root}/out/milestone0/u-boot/latest}"
+readonly evidence="${1:-${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0/u-boot/latest}"
 
 test -d "$evidence"
 for required in SHA256SUMS build.log config file.txt manifest.txt packages.txt supported-socs.txt u-boot u-boot-nodtb.bin; do

@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
-readonly evidence="${1:-${project_root}/out/milestone0/linux-dtb/latest}"
+source "${project_root}/scripts/lib/milestone0-output-root.sh"
+m0_validate_output_root "$project_root"
+readonly evidence="${1:-${MILESTONE0_OUTPUT_ROOT}/milestone0/linux-dtb/latest}"
 
 test -d "$evidence"
 for required in SHA256SUMS build.log compatible.txt config dtc.log file.txt manifest.txt model.txt packages.txt t6030-j514s.dtb t6030-j514s.dts; do

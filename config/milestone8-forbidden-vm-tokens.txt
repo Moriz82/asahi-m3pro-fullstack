@@ -1,0 +1,15 @@
+# Case-insensitive tokens that invalidate a package closure or preview repo.
+qemu
+virtio
+virgl
+llvmpipe
+softpipe
+swrast
+software-render
+software-renderer
+vmware
+virtualbox
+vhost
+host-passthrough
+machine=q35
+accel=kvm

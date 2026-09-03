@@ -1,0 +1,5 @@
+key	value
+sip	enabled
+filevault	enabled
+boot_policy	unchanged
+raw_biometric_export	false

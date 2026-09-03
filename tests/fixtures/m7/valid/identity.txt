@@ -1,0 +1,3 @@
+model=Mac15,6
+board=J514s
+soc=T6030

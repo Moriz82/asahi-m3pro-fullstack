@@ -1,0 +1,27 @@
+# Pinned DT schema toolchain for the Debian and Arch builders. libfdt is
+# supplied by each builder's device-tree-compiler package; all Python
+# distributions installed here are hash-locked.
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+dtschema==2025.12 \
+    --hash=sha256:89099e25e5ffbad2f8421879ffbac75f44e70268f3ad9e34710ebe16ef8e49d7
+jsonschema==4.26.0 \
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+pathspec==0.12.1 \
+    --hash=sha256:a0d503e138a4c123b27490a4f7beda6a01c6f288df0e4a8b79c7eb0dc7b4cc08
+PyYAML==6.0.3 \
+    --hash=sha256:10892704fc220243f5305762e276552a0395f7beb4dbf9b14ec8fd43b57f126c \
+    --hash=sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7
+referencing==0.35.1 \
+    --hash=sha256:eda6d3234d62814d1c64e305c1331c9a3a6132da475ab6382eaa997b21ee75de
+rfc3987==1.3.8 \
+    --hash=sha256:10702b1e51e5658843460b189b185c0366d2cf4cff716f13111b0ea9fd2dce53
+rpds-py==0.30.0 \
+    --hash=sha256:422c3cb9856d80b09d30d2eb255d0754b23e090034e1deb4083f8004bd0761e4 \
+    --hash=sha256:f251c812357a3fed308d684a5079ddfb9d933860fc6de89f2b7ab00da481e65f
+ruamel.yaml==0.19.1 \
+    --hash=sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93
+yamllint==1.37.1 \
+    --hash=sha256:364f0d79e81409f591e323725e6a9f4504c8699ddf2d7263d8d2b539cd66a583

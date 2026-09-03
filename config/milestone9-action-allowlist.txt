@@ -1,0 +1,13 @@
+# Static plan actions. These names record evidence transitions only.
+preflight
+verify-source
+verify-payload
+review-free-space
+stage-install
+recover-interrupted-install
+plan-reinstall
+plan-update
+plan-rollback
+plan-removal
+record-recovery
+record-dfu-evidence

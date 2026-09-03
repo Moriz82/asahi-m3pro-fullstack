@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
+readonly source_volume="${SOURCE_VOLUME_OVERRIDE:-${SOURCE_VOLUME}}"
+source "${project_root}/scripts/lib/milestone0-output-root.sh"
+m0_validate_output_root "$project_root"
+readonly output_root="$MILESTONE0_OUTPUT_ROOT"
 
 for value in BASE_IMAGE DEBIAN_SNAPSHOT RUST_VERSION RUSTUP_VERSION RUSTUP_INIT_SHA256 BUILD_IMAGE SOURCE_VOLUME M1N1_URL M1N1_REF M1N1_COMMIT M1N1_ARTWORK_COMMIT M1N1_UPSTREAM_URL M1N1_UPSTREAM_REF M1N1_UPSTREAM_COMMIT; do
     test -n "${!value:-}" || {
@@ -19,7 +23,7 @@ done
 command -v docker >/dev/null
 docker info >/dev/null
 
-readonly bundle_dir="${project_root}/out/cache"
+readonly bundle_dir="${output_root}/cache"
 readonly mirror="${bundle_dir}/m1n1.git"
 readonly bundle="${bundle_dir}/m1n1.bundle"
 mkdir -p "$bundle_dir"
@@ -55,18 +59,18 @@ docker build \
     --tag "$BUILD_IMAGE" \
     "${project_root}/build"
 
-if ! docker volume inspect "$SOURCE_VOLUME" >/dev/null 2>&1; then
+if ! docker volume inspect "$source_volume" >/dev/null 2>&1; then
     docker volume create \
         --label com.moriz.project=asahi-m3pro-fullstack \
         --label com.moriz.purpose=milestone0-source \
-        "$SOURCE_VOLUME" >/dev/null
+        "$source_volume" >/dev/null
 fi
 
-test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}' "$SOURCE_VOLUME")" = \
+test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}' "$source_volume")" = \
     asahi-m3pro-fullstack
 
 readonly image_id="$(docker image inspect --format '{{.Id}}' "$BUILD_IMAGE")"
-mkdir -p "${project_root}/out"
+mkdir -p "$output_root"
 
 docker run --rm \
     --env "BUILD_IMAGE=${BUILD_IMAGE}" \
@@ -83,10 +87,12 @@ docker run --rm \
     --env "M1N1_UPSTREAM_REF=${M1N1_UPSTREAM_REF}" \
     --env "M1N1_UPSTREAM_URL=${M1N1_UPSTREAM_URL}" \
     --mount "type=bind,src=${bundle},dst=/inputs/m1n1.bundle,readonly" \
-    --mount "type=volume,src=${SOURCE_VOLUME},dst=/workspace" \
-    --mount "type=bind,src=${project_root}/out,dst=/out" \
+    --mount "type=volume,src=${source_volume},dst=/workspace" \
+    --mount "type=bind,src=${output_root},dst=/out" \
     "$BUILD_IMAGE" \
     bash -Eeuo pipefail -c '
+        exec 9>/workspace/.milestone0-build.lock
+        flock -n 9 || { printf "Another Milestone 0 build owns the source volume\n" >&2; exit 1; }
         readonly source_root=/workspace/src
         readonly build_root=/workspace/build
         readonly repository=${source_root}/m1n1
@@ -121,6 +127,7 @@ docker run --rm \
         git -C "$repository" submodule update --init --recursive
         test "$(git -C "$repository" rev-parse HEAD)" = "$M1N1_COMMIT"
         test "$(git -C "${repository}/artwork" rev-parse HEAD)" = "$M1N1_ARTWORK_COMMIT"
+        readonly source_epoch="$(git -C "$repository" show -s --format=%ct HEAD)"
 
         if [[ -e "${repository}/build" && ! -L "${repository}/build" ]]; then
             printf "Refusing non-symlink source build path: %s\n" "${repository}/build" >&2
@@ -132,12 +139,19 @@ docker run --rm \
         test "$(readlink "${repository}/build")" = ../../build/m1n1
 
         make -C "$repository" clean
-        readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+        readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N8 -tx1 /dev/urandom | tr -d "[:space:]")"
         readonly stage="/out/milestone0/m1n1/.${run_id}.tmp"
         readonly destination="/out/milestone0/m1n1/${run_id}"
-        install -d "$stage"
+        readonly latest="/out/milestone0/m1n1/latest"
+        readonly latest_tmp="/out/milestone0/m1n1/.latest.${run_id}.tmp"
+        if [[ -e "$stage" || -L "$stage" || -e "$destination" || -L "$destination" || -e "$latest_tmp" || -L "$latest_tmp" ]] ||
+            [[ -e "$latest" && ! -L "$latest" ]]; then
+            printf "Refusing colliding m1n1 publication path for run %s\n" "$run_id" >&2
+            exit 1
+        fi
+        mkdir "$stage"
 
-        LC_ALL=C make -C "$repository" ARCH= RELEASE=1 -j"$(nproc)" \
+        LC_ALL=C SOURCE_DATE_EPOCH="$source_epoch" make -C "$repository" ARCH= RELEASE=1 -j"$(nproc)" \
             2>&1 | tee "${stage}/build.log"
 
         install -m 0644 "${component_build}/m1n1.macho" "${stage}/m1n1.macho"
@@ -158,6 +172,7 @@ docker run --rm \
             printf "upstream_commit=%s\n" "$M1N1_UPSTREAM_COMMIT"
             printf "source_describe=%s\n" "$(git -C "$repository" describe --always --dirty)"
             printf "source_clean=%s\n" "$(test -z "$(source_status)" && printf true || printf false)"
+            printf "source_date_epoch=%s\n" "$source_epoch"
             printf "artwork_commit=%s\n" "$(git -C "${repository}/artwork" rev-parse HEAD)"
             printf "workspace_filesystem=%s\n" "$filesystem_type"
             printf "debian_snapshot=%s\n" "$DEBIAN_SNAPSHOT"
@@ -181,8 +196,9 @@ docker run --rm \
         )
 
         mv "$stage" "$destination"
-        ln -sfn "$run_id" /out/milestone0/m1n1/latest
+        ln -s "$run_id" "$latest_tmp"
+        mv -Tf "$latest_tmp" "$latest"
         printf "m1n1.baseline=%s\n" "$destination"
     '
 
-"${project_root}/scripts/verify-m1n1.sh"
+"${project_root}/scripts/verify-m1n1.sh" "${output_root}/milestone0/m1n1/latest"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC1091,SC2155
+set -Eeuo pipefail
+
+readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "${project_root}/config/milestone0.env"
+source "${project_root}/config/milestone1.env"
+readonly output_root="${MILESTONE1_OUTPUT_ROOT:-${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone1}"
+readonly m0_root="${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0"
+
+build_command() {
+    local device="$1" tool="$2" image="$3" dtb="$4" initramfs="$5"
+    printf 'M1N1DEVICE=%q python3 %q --compression %q %q %q %q\n' \
+        "$device" "$tool" "$M1_COMPRESSION" "$image" "$dtb" "$initramfs"
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+    rendered="$(build_command /dev/test /tmp/linux.py /tmp/Image /tmp/j514s.dtb /tmp/initramfs)"
+    [[ "$rendered" == 'M1N1DEVICE=/dev/test python3 /tmp/linux.py --compression none /tmp/Image /tmp/j514s.dtb /tmp/initramfs' ]]
+    if grep -Fq 'root=' <<<"$rendered"; then exit 1; fi
+    printf 'milestone1-dry-run self-test passed\n'
+    exit 0
+fi
+
+test -n "$M1N1DEVICE" || { printf 'M1N1DEVICE must be explicit.\n' >&2; exit 2; }
+test -n "$M1_M1N1_SOURCE_DIR" || { printf 'M1_M1N1_SOURCE_DIR must be explicit.\n' >&2; exit 2; }
+readonly image="${m0_root}/${M1_KERNEL_RELATIVE}"
+readonly dtb="${m0_root}/${M1_DTB_RELATIVE}"
+readonly initramfs="${output_root}/initramfs/latest/${M1_INITRAMFS_NAME}"
+readonly tool="${M1_M1N1_SOURCE_DIR}/${M1_M1N1_TOOL_RELATIVE}"
+test -s "$image" && test -s "$dtb" && test -s "$initramfs" && test -f "$tool" || {
+    printf 'Missing one or more dry-run inputs; build and verify M0/M1 first.\n' >&2
+    exit 1
+}
+"${project_root}/scripts/verify-milestone1-initramfs.sh"
+build_command "$M1N1DEVICE" "$tool" "$image" "$dtb" "$initramfs"
