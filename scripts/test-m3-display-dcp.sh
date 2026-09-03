@@ -38,6 +38,27 @@ rm -f "$duplicate_suspend/suspend-resume.tsv.bak"
 duplicate_suspend_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m3-duplicate-suspend.XXXXXX")
 rmdir "$duplicate_suspend_out"
 expect_fail "$project_root/scripts/collect-m3-display-dcp.sh" --dry-run --input-dir "$duplicate_suspend" --out "$duplicate_suspend_out"
+reject_mutation() {
+    local name=$1 file=$2 expression=$3 candidate="$tmp/$1" candidate_out
+    cp -R "$valid" "$candidate"
+    sed -i.bak "$expression" "$candidate/$file"
+    rm -f "$candidate/$file.bak"
+    candidate_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m3-$name.XXXXXX")
+    rmdir "$candidate_out"
+    expect_fail "$project_root/scripts/collect-m3-display-dcp.sh" --dry-run --input-dir "$candidate" --out "$candidate_out"
+}
+reject_mutation invalid-width display-modes.tsv '2s/3024/wide/'
+reject_mutation zero-height display-modes.tsv '2s/1964/0/'
+reject_mutation zero-refresh display-modes.tsv '2s/120/0/'
+reject_mutation over-brightness brightness.tsv '2s/50/101/'
+reject_mutation invalid-resume suspend-resume.tsv '2s/10/not-a-time/'
+duplicate_mode="$tmp/duplicate-mode"
+cp -R "$valid" "$duplicate_mode"
+duplicate_mode_row=$(tail -n 1 "$duplicate_mode/display-modes.tsv")
+printf '%s\n' "$duplicate_mode_row" >> "$duplicate_mode/display-modes.tsv"
+duplicate_mode_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m3-duplicate-mode.XXXXXX")
+rmdir "$duplicate_mode_out"
+expect_fail "$project_root/scripts/collect-m3-display-dcp.sh" --dry-run --input-dir "$duplicate_mode" --out "$duplicate_mode_out"
 printf 'pass\n' >> "$valid/brightness.tsv"
 pass_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m3-pass.XXXXXX"); rmdir "$pass_out"
 expect_fail "$project_root/scripts/collect-m3-display-dcp.sh" --dry-run --input-dir "$valid" --out "$pass_out"

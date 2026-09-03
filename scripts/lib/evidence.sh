@@ -261,17 +261,50 @@ evidence_validate_cycle_tsv() {
 }
 
 evidence_validate_modes_tsv() {
-    local file=$1 line row_count=0
-    evidence_validate_tsv "$file" mode 0
-    IFS=$'\t' read -r -a _e_header < "$file"
-    for key in width height; do printf '%s\n' "${_e_header[@]}" | grep -Fx "$key" >/dev/null || evidence_die "missing display mode column $key"; done
+    local file=$1 line mode width height refresh tuple seen='|' row_count=0 i
+    local mode_index=-1 width_index=-1 height_index=-1 refresh_index=-1
+    local -a header fields
+    evidence_validate_tsv "$file" 'mode width height refresh_hz' 0
+    IFS=$'\t' read -r -a header < "$file"
+    for i in "${!header[@]}"; do
+        case ${header[i]} in
+            mode) ((mode_index == -1)) || evidence_die "duplicate display mode column: $file"; mode_index=$i;;
+            width) ((width_index == -1)) || evidence_die "duplicate display width column: $file"; width_index=$i;;
+            height) ((height_index == -1)) || evidence_die "duplicate display height column: $file"; height_index=$i;;
+            refresh_hz) ((refresh_index == -1)) || evidence_die "duplicate display refresh column: $file"; refresh_index=$i;;
+        esac
+    done
+    ((mode_index >= 0 && width_index >= 0 && height_index >= 0 && refresh_index >= 0)) || evidence_die "incomplete display mode header: $file"
     while IFS=$'\t' read -r line; do
         [[ -z $line ]] && continue
-        IFS=$'\t' read -r -a _e_fields <<< "$line"
-        [[ ${_e_fields[*]} =~ [0-9]+ ]] || evidence_die "unstructured display mode row: $file"
+        IFS=$'\t' read -r -a fields <<< "$line"
+        mode=${fields[mode_index]}; width=${fields[width_index]}; height=${fields[height_index]}; refresh=${fields[refresh_index]}
+        [[ $mode =~ ^[A-Za-z0-9][A-Za-z0-9._:+-]*$ ]] || evidence_die "invalid display mode name: $file"
+        [[ $width =~ ^[1-9][0-9]*$ && $height =~ ^[1-9][0-9]*$ ]] || evidence_die "invalid display dimensions: $file"
+        [[ $refresh =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v value="$refresh" 'BEGIN { exit !(value > 0) }' || evidence_die "invalid display refresh: $file"
+        tuple="$mode|$width|$height|$refresh"
+        [[ $seen != *"|$tuple|"* ]] || evidence_die "duplicate display mode: $file"
+        seen="${seen}${tuple}|"
         row_count=$((row_count + 1))
     done < <(tail -n +2 "$file")
     ((row_count > 0)) || evidence_die "no display modes declared: $file"
+}
+
+evidence_validate_numeric_column_range() {
+    local file=$1 column=$2 minimum=$3 maximum=${4:-}
+    awk -F '\t' -v column="$column" -v minimum="$minimum" -v maximum="$maximum" '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) if ($i == column) { column_index = i; found++ }
+            if (found != 1) invalid = 1
+            next
+        }
+        NF > 0 {
+            rows++
+            value = $column_index
+            if (value !~ /^[0-9]+([.][0-9]+)?$/ || value < minimum || (maximum != "" && value > maximum)) invalid = 1
+        }
+        END { exit invalid || !rows }
+    ' "$file" || evidence_die "invalid $column values: $file"
 }
 
 evidence_validate_no_bare_pass() {
@@ -328,6 +361,8 @@ evidence_validate_m3() {
     evidence_validate_modes_tsv "$root/display-modes.tsv"
     evidence_validate_cycle_tsv "$root/brightness.tsv" 100
     evidence_validate_cycle_tsv "$root/suspend-resume.tsv" 50
+    evidence_validate_numeric_column_range "$root/brightness.tsv" brightness_percent 0 100
+    evidence_validate_numeric_column_range "$root/suspend-resume.tsv" resume_ms 0
     evidence_validate_no_bare_pass "$root/brightness.tsv"
     evidence_validate_no_bare_pass "$root/suspend-resume.tsv"
 }
