@@ -1,0 +1,890 @@
+diff --git a/src/nvme.c b/src/nvme.c
+index 5ced2c7..fe0d88c 100644
+--- a/src/nvme.c
++++ b/src/nvme.c
+@@ -128,6 +128,12 @@ static enum {
+ } nvme_type;
+ 
+ static bool nvme_initialized = false;
++static bool nvme_owned, nvme_stopping, nvme_boot_attempted;
++static bool nvme_controller_touched, nvme_controller_active;
++static bool nvme_powered_down, nvme_reset_done, nvme_reset_failed;
++static bool nvme_command_active, nvme_command_faulted;
++/* DMA must never outlive a caller's read buffer after an uncertain command. */
++static void *nvme_read_buffer;
+ static u8 nvme_die;
+ 
+ static asc_dev_t *nvme_asc = NULL;
+@@ -166,6 +172,7 @@ free_cmds:
+     free(q->cmds);
+ free_tcbs:
+     free(q->tcbs);
++    memset(q, 0, sizeof(*q));
+     return false;
+ }
+ 
+@@ -174,12 +181,13 @@ static void free_queue(struct nvme_queue *q)
+     free(q->cmds);
+     free(q->tcbs);
+     free(q->cqes);
++    memset(q, 0, sizeof(*q));
+ }
+ 
+-static void nvme_poll_syslog(void)
++static bool nvme_poll_syslog(void)
+ {
+     struct rtkit_message msg;
+-    rtkit_recv(nvme_rtkit, &msg);
++    return rtkit_recv(nvme_rtkit, &msg) >= 0;
+ }
+ 
+ static bool nvme_ctrl_disable(void)
+@@ -188,7 +196,8 @@ static bool nvme_ctrl_disable(void)
+ 
+     clear32(nvme_base + NVME_CC, NVME_CC_EN);
+     while (read32(nvme_base + NVME_CSTS) & NVME_CSTS_RDY && !timeout_expired(timeout))
+-        nvme_poll_syslog();
++        if (!nvme_poll_syslog())
++            return false;
+ 
+     return !(read32(nvme_base + NVME_CSTS) & NVME_CSTS_RDY);
+ }
+@@ -199,7 +208,8 @@ static bool nvme_ctrl_enable(void)
+ 
+     mask32(nvme_base + NVME_CC, NVME_CC_SHN, NVME_CC_EN);
+     while (!(read32(nvme_base + NVME_CSTS) & NVME_CSTS_RDY) && !timeout_expired(timeout))
+-        nvme_poll_syslog();
++        if (!nvme_poll_syslog())
++            return false;
+ 
+     return read32(nvme_base + NVME_CSTS) & NVME_CSTS_RDY;
+ }
+@@ -211,12 +221,13 @@ static bool nvme_ctrl_shutdown(void)
+     mask32(nvme_base + NVME_CC, NVME_CC_SHN, FIELD_PREP(NVME_CC_SHN, NVME_CC_SHN_NORMAL));
+     while (FIELD_GET(NVME_CSTS_SHST, read32(nvme_base + NVME_CSTS)) != NVME_CSTS_SHST_DONE &&
+            !timeout_expired(timeout))
+-        nvme_poll_syslog();
++        if (!nvme_poll_syslog())
++            return false;
+ 
+     return FIELD_GET(NVME_CSTS_SHST, read32(nvme_base + NVME_CSTS)) == NVME_CSTS_SHST_DONE;
+ }
+ 
+-static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u64 *result)
++static bool nvme_exec_command_inner(struct nvme_queue *q, struct nvme_command *cmd, u64 *result)
+ {
+     bool found = false;
+     u64 timeout;
+@@ -243,17 +254,20 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+     /* make sure ANS2 can see the command and tcb before triggering it */
+     dma_wmb();
+ 
+-    nvme_poll_syslog();
++    if (!nvme_poll_syslog())
++        goto uncertain;
+     if (q->adminq)
+         write32(nvme_base + NVME_DB_LINEAR_ASQ, tag);
+     else
+         write32(nvme_base + NVME_DB_LINEAR_IOSQ, tag);
+-    nvme_poll_syslog();
++    if (!nvme_poll_syslog())
++        goto uncertain;
+ 
+     timeout = timeout_calculate(NVME_TIMEOUT);
+     struct nvme_completion cqe;
+     while (!timeout_expired(timeout)) {
+-        nvme_poll_syslog();
++        if (!nvme_poll_syslog())
++            goto uncertain;
+ 
+         /* we need a DMA read barrier here since the CQ will be updated using DMA */
+         dma_rmb();
+@@ -263,15 +277,16 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+ 
+         if (cqe.tag == tag) {
+             found = true;
+-            if (result)
+-                *result = cqe.result;
+         } else {
+             printf("nvme: invalid tag in CQ: expected %d but got %d\n", tag, cqe.tag);
++            goto uncertain;
+         }
+ 
+         write32(nvmmu_base + NVMMU_TCB_INVAL, cqe.tag);
+-        if (read32(nvmmu_base + NVMMU_TCB_STAT))
++        if (read32(nvmmu_base + NVMMU_TCB_STAT)) {
+             printf("nvme: NVMMU invalidation for tag %d failed\n", cqe.tag);
++            goto uncertain;
++        }
+ 
+         /* increment head and switch phase once the end of the queue has been reached */
+         q->cq_head += 1;
+@@ -289,7 +304,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+ 
+     if (!found) {
+         printf("nvme: could not find command completion in CQ\n");
+-        return false;
++        goto uncertain;
+     }
+ 
+     cqe.status >>= 1;
+@@ -298,15 +313,33 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+         return false;
+     }
+ 
++    if (result)
++        *result = cqe.result;
+     return true;
++
++uncertain:
++    nvme_command_faulted = true;
++    return false;
++}
++
++static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u64 *result)
++{
++    if (nvme_command_active || nvme_command_faulted)
++        return false;
++    nvme_command_active = true;
++    bool ret = nvme_exec_command_inner(q, cmd, result);
++    nvme_command_active = false;
++    return ret;
+ }
+ 
+ bool nvme_init(void)
+ {
+-    if (nvme_initialized) {
++    if (nvme_initialized && !nvme_stopping && !nvme_command_faulted) {
+         printf("nvme: already initialized\n");
+         return true;
+     }
++    if (nvme_owned)
++        return false;
+ 
+     int adt_path[8];
+     int node = adt_path_offset_trace(adt, "/arm-io/ans", adt_path);
+@@ -350,34 +383,46 @@ bool nvme_init(void)
+         printf("nvme: Error allocating admin queue\n");
+         return NULL;
+     }
++    nvme_owned = true;
+     if (!alloc_queue(&ioq)) {
+         printf("nvme: Error allocating admin queue\n");
+-        goto out_adminq;
++        goto out_shutdown;
+     }
++    nvme_read_buffer = memalign(SZ_4K, SZ_4K);
++    if (!nvme_read_buffer)
++        goto out_shutdown;
+ 
+     ioq.adminq = false;
+     adminq.adminq = true;
+ 
+     nvme_asc = asc_init("/arm-io/ans");
+     if (!nvme_asc)
+-        goto out_ioq;
++        goto out_shutdown;
+ 
+     nvme_sart = sart_init("/arm-io/sart-ans");
+     if (!nvme_sart)
+-        goto out_asc;
++        goto out_shutdown;
+ 
+     nvme_rtkit = rtkit_init("nvme", nvme_asc, NULL, NULL, nvme_sart, false);
+     if (!nvme_rtkit)
+-        goto out_sart;
++        goto out_shutdown;
+ 
++    nvme_boot_attempted = true;
+     if (!rtkit_boot(nvme_rtkit))
+-        goto out_rtkit;
++        goto out_shutdown;
+ 
+     if (poll32(nvme_base + NVME_BOOT_STATUS, 0xffffffff, NVME_BOOT_STATUS_OK, USEC_PER_SEC) < 0) {
+         printf("nvme: ANS did not boot correctly.\n");
+         goto out_shutdown;
+     }
+ 
++    /* Disable the controller before publishing our queue addresses. */
++    nvme_controller_touched = true;
++    if (!nvme_ctrl_disable()) {
++        printf("nvme: timeout while waiting for CSTS.RDY to clear\n");
++        goto out_shutdown;
++    }
++
+     /* setup controller and NVMMU for linear submission queue */
+     set32(nvme_base + NVME_LINEAR_SQ_CTRL, NVME_LINEAR_SQ_CTRL_EN);
+     write32(nvme_base + NVME_MAX_PEND_CMDS_CTRL,
+@@ -387,16 +432,13 @@ bool nvme_init(void)
+     write64_lo_hi(nvmmu_base + NVMMU_IOSQ_BASE, (u64)ioq.tcbs);
+ 
+     /* setup admin queue */
+-    if (!nvme_ctrl_disable()) {
+-        printf("nvme: timeout while waiting for CSTS.RDY to clear\n");
+-        goto out_shutdown;
+-    }
+     write64_lo_hi(nvme_base + NVME_ASQ, (u64)adminq.cmds);
+     write64_lo_hi(nvme_base + NVME_ACQ, (u64)adminq.cqes);
+     write32(nvme_base + NVME_AQA, ((NVME_QUEUE_SIZE - 1) << 16) | (NVME_QUEUE_SIZE - 1));
++    nvme_controller_active = true;
+     if (!nvme_ctrl_enable()) {
+         printf("nvme: timeout while waiting for CSTS.RDY to be set\n");
+-        goto out_disable_ctrl;
++        goto out_shutdown;
+     }
+ 
+     /* setup IO queue */
+@@ -410,7 +452,7 @@ bool nvme_init(void)
+     cmd.cdw11 = NVME_QUEUE_CONTIGUOUS;
+     if (!nvme_exec_command(&adminq, &cmd, NULL)) {
+         printf("nvme: create cq command failed\n");
+-        goto out_disable_ctrl;
++        goto out_shutdown;
+     }
+ 
+     memset(&cmd, 0, sizeof(cmd));
+@@ -422,7 +464,7 @@ bool nvme_init(void)
+     cmd.cdw11 |= 1 << 16; // cq id for this sq
+     if (!nvme_exec_command(&adminq, &cmd, NULL)) {
+         printf("nvme: create sq command failed\n");
+-        goto out_delete_cq;
++        goto out_shutdown;
+     }
+ 
+     if (nvme_type == NVME_T8132) {
+@@ -437,124 +479,85 @@ bool nvme_init(void)
+     printf("nvme: initialized at 0x%lx\n", nvme_base);
+     return true;
+ 
+-out_delete_cq:
+-    memset(&cmd, 0, sizeof(cmd));
+-    cmd.opcode = NVME_ADMIN_CMD_DELETE_CQ;
+-    cmd.cdw10 = 1; // cq id
+-    if (!nvme_exec_command(&adminq, &cmd, NULL))
+-        printf("nvme: delete cq command failed\n");
+-out_disable_ctrl:
+-    nvme_ctrl_shutdown();
+-    nvme_ctrl_disable();
+-    nvme_poll_syslog();
+ out_shutdown:
+-    rtkit_sleep(nvme_rtkit);
+-    // Some machines call this ANS, some ANS2...
+-    pmgr_reset(nvme_die, "ANS");
+-    pmgr_reset(nvme_die, "ANS2");
+-out_rtkit:
+-    rtkit_free(nvme_rtkit);
+-out_sart:
+-    sart_free(nvme_sart);
+-out_asc:
+-    asc_free(nvme_asc);
+-out_ioq:
+-    free_queue(&ioq);
+-out_adminq:
+-    free_queue(&adminq);
++    if (!nvme_shutdown())
++        printf("nvme: retaining failed initialization\n");
+     return false;
+ }
+ 
+-void nvme_ensure_shutdown(void)
++bool nvme_shutdown(void)
+ {
+-    nvme_asc = asc_init("/arm-io/ans");
+-    if (!nvme_asc)
+-        return;
++    if (!nvme_owned)
++        return true;
++    bool first = !nvme_stopping;
++    nvme_stopping = true;
++    if (nvme_command_active || nvme_reset_failed)
++        return false;
+ 
+-    if (!asc_cpu_running(nvme_asc)) {
+-        printf("nvme: ANS not running\n");
+-        asc_free(nvme_asc);
+-        nvme_asc = NULL;
+-        return;
++    if (first && nvme_initialized && !nvme_command_faulted) {
++        struct nvme_command cmd = {.opcode = NVME_ADMIN_CMD_DELETE_SQ, .cdw10 = 1};
++        if (!nvme_exec_command(&adminq, &cmd, NULL))
++            printf("nvme: delete sq failed; controller shutdown required\n");
++        cmd.opcode = NVME_ADMIN_CMD_DELETE_CQ;
++        if (!nvme_exec_command(&adminq, &cmd, NULL))
++            printf("nvme: delete cq failed; controller shutdown required\n");
+     }
+ 
+-    printf("nvme: Found ANS left powered, doing a proper shutdown\n");
+-
+-    nvme_sart = sart_init("/arm-io/sart-ans");
+-    if (!nvme_sart)
+-        goto fail;
+-
+-    nvme_rtkit = rtkit_init("nvme", nvme_asc, NULL, NULL, nvme_sart, false);
+-    if (!nvme_rtkit)
+-        goto fail;
+-
+-    if (!rtkit_boot(nvme_rtkit))
+-        goto fail;
+-
+-    rtkit_sleep(nvme_rtkit);
+-
+-fail:
+-    if (nvme_rtkit) {
+-        rtkit_free(nvme_rtkit);
+-        nvme_rtkit = NULL;
++    if (nvme_controller_active) {
++        if (!nvme_ctrl_shutdown())
++            return false;
++        nvme_controller_active = false;
+     }
+-    if (nvme_sart) {
+-        sart_free(nvme_sart);
+-        nvme_sart = NULL;
++    if (nvme_controller_touched) {
++        if (!nvme_ctrl_disable())
++            return false;
++        nvme_controller_touched = false;
+     }
+-    asc_free(nvme_asc);
+-    nvme_asc = NULL;
+-
+-    // Some machines call this ANS, some ANS2...
+-    pmgr_reset(nvme_die, "ANS");
+-    pmgr_reset(nvme_die, "ANS2");
+-}
+-
+-void nvme_shutdown(void)
+-{
+-    if (!nvme_initialized) {
+-        // nvme_ensure_shutdown();
+-        return;
++    if (nvme_boot_attempted && !nvme_powered_down) {
++        if (!rtkit_sleep(nvme_rtkit))
++            return false;
++        nvme_powered_down = true;
+     }
+-
+-    struct nvme_command cmd;
+-
+-    memset(&cmd, 0, sizeof(cmd));
+-    cmd.opcode = NVME_ADMIN_CMD_DELETE_SQ;
+-    cmd.cdw10 = 1; // sq id
+-    if (!nvme_exec_command(&adminq, &cmd, NULL))
+-        printf("nvme: delete sq command failed\n");
+-
+-    memset(&cmd, 0, sizeof(cmd));
+-    cmd.opcode = NVME_ADMIN_CMD_DELETE_CQ;
+-    cmd.cdw10 = 1; // cq id
+-    if (!nvme_exec_command(&adminq, &cmd, NULL))
+-        printf("nvme: delete cq command failed\n");
+-
+-    if (!nvme_ctrl_shutdown())
+-        printf("nvme: timeout while waiting for controller shutdown\n");
+-    if (!nvme_ctrl_disable())
+-        printf("nvme: timeout while waiting for CSTS.RDY to clear\n");
+-
+-    rtkit_sleep(nvme_rtkit);
+-    // Some machines call this ANS, some ANS2...
+-    pmgr_reset(nvme_die, "ANS");
+-    pmgr_reset(nvme_die, "ANS2");
+-    rtkit_free(nvme_rtkit);
+-    sart_free(nvme_sart);
+-    asc_free(nvme_asc);
++    if (nvme_boot_attempted && !nvme_reset_done) {
++        /* Missing alternative name is distinct from a failed reset. */
++        int ans = pmgr_reset(nvme_die, "ANS");
++        if (ans && ans != PMGR_RESET_NOT_FOUND)
++            goto reset_failed;
++        int ans2 = pmgr_reset(nvme_die, "ANS2");
++        if ((ans2 && ans2 != PMGR_RESET_NOT_FOUND) || (ans && ans2))
++            goto reset_failed;
++        nvme_reset_done = true;
++    }
++    if (!rtkit_free(nvme_rtkit))
++        return false;
++    nvme_rtkit = NULL;
++    if (nvme_sart)
++        sart_free(nvme_sart);
++    nvme_sart = NULL;
++    if (nvme_asc)
++        asc_free(nvme_asc);
++    nvme_asc = NULL;
+     free_queue(&ioq);
+     free_queue(&adminq);
++    free(nvme_read_buffer);
++    nvme_read_buffer = NULL;
+     nvme_initialized = false;
++    nvme_owned = nvme_stopping = nvme_boot_attempted = false;
++    nvme_powered_down = nvme_reset_done = nvme_command_faulted = false;
+ 
+     printf("nvme: shutdown done\n");
++    return true;
++
++reset_failed:
++    nvme_reset_failed = true;
++    return false;
+ }
+ 
+ bool nvme_flush(u32 nsid)
+ {
+     struct nvme_command cmd;
+ 
+-    if (!nvme_initialized)
++    if (!nvme_initialized || nvme_stopping || nvme_command_faulted)
+         return false;
+ 
+     memset(&cmd, 0, sizeof(cmd));
+@@ -569,7 +572,7 @@ bool nvme_read(u32 nsid, u64 lba, void *buffer)
+     struct nvme_command cmd;
+     u64 buffer_addr = (u64)buffer;
+ 
+-    if (!nvme_initialized)
++    if (!nvme_initialized || nvme_stopping || nvme_command_faulted || !buffer)
+         return false;
+ 
+     /* no need for 16K alignment here since the NVME page size is 4k */
+@@ -579,10 +582,13 @@ bool nvme_read(u32 nsid, u64 lba, void *buffer)
+     memset(&cmd, 0, sizeof(cmd));
+     cmd.opcode = NVME_CMD_READ;
+     cmd.nsid = nsid;
+-    cmd.prp1 = (u64)buffer_addr;
++    cmd.prp1 = (u64)nvme_read_buffer;
+     cmd.cdw10 = lba;
+     cmd.cdw11 = lba >> 32;
+     cmd.cdw12 = 0; // #blocks, 0-based -> 1 block a 4096 bytes
+ 
+-    return nvme_exec_command(&ioq, &cmd, NULL);
++    if (!nvme_exec_command(&ioq, &cmd, NULL))
++        return false;
++    memcpy(buffer, nvme_read_buffer, SZ_4K);
++    return true;
+ }
+diff --git a/src/nvme.h b/src/nvme.h
+index 8989a60..1de87cf 100644
+--- a/src/nvme.h
++++ b/src/nvme.h
+@@ -6,9 +6,11 @@
+ #include "types.h"
+ 
+ bool nvme_init(void);
+-void nvme_shutdown(void);
++/* False retains owned queues/buffers and blocks reinitialization/handoff. */
++bool nvme_shutdown(void);
+ 
+ bool nvme_flush(u32 nsid);
++/* One aligned 4 KiB sector; failure leaves caller memory unchanged. */
+ bool nvme_read(u32 nsid, u64 lba, void *buffer);
+ 
+ #endif
+diff --git a/src/smc.c b/src/smc.c
+index 3fee45a..399a3b6 100644
+--- a/src/smc.c
++++ b/src/smc.c
+@@ -39,22 +39,37 @@ struct smc_dev {
+ 
+     bool outstanding[SMC_NUM_IDS];
+     u64 ret[SMC_NUM_IDS];
++    bool boot_attempted;
++    bool initializing;
++    bool stopping;
++    bool failed;
++    bool quiesced;
++    unsigned active_calls;
+ };
+ 
+-static void smc_handle_msg(smc_dev_t *smc, u64 msg)
++/* Single-caller bootloader owner, including failed initialization. */
++static smc_dev_t *active_smc;
++
++static int smc_handle_msg(smc_dev_t *smc, u64 msg)
+ {
+-    if (!smc->shmem)
++    if (!smc->shmem) {
++        if (!smc->initializing || !msg || (msg & 3))
++            return -1;
+         smc->shmem = (void *)msg;
+-    else {
++        smc->initializing = false;
++    } else {
+         u8 result = FIELD_GET(SMC_RESULT_RESULT, msg);
+         u8 id = FIELD_GET(SMC_RESULT_ID, msg);
+         if (result == SMC_NOTIFICATION) {
+             printf("SMC: Notification: 0x%08lx\n", FIELD_GET(SMC_RESULT_VALUE, msg));
+-            return;
++            return 0;
+         }
++        if (!smc->outstanding[id])
++            return -1;
+         smc->outstanding[id] = false;
+         smc->ret[id] = msg;
+     }
++    return 0;
+ }
+ 
+ static int smc_work(smc_dev_t *smc)
+@@ -62,8 +77,9 @@ static int smc_work(smc_dev_t *smc)
+     int ret;
+     struct rtkit_message msg;
+ 
+-    while ((ret = rtkit_recv(smc->rtkit, &msg)) == 0)
+-        ;
++    ret = rtkit_recv(smc->rtkit, &msg);
++    if (!ret)
++        return 0;
+ 
+     if (ret < 0) {
+         printf("SMC: rtkit_recv failed!\n");
+@@ -75,32 +91,39 @@ static int smc_work(smc_dev_t *smc)
+         return 0;
+     }
+ 
+-    smc_handle_msg(smc, msg.msg);
+-
+-    return 0;
++    return smc_handle_msg(smc, msg.msg);
+ }
+ 
+-static void smc_send(smc_dev_t *smc, u64 message)
++static bool smc_send(smc_dev_t *smc, u64 message)
+ {
+     struct rtkit_message msg;
+ 
+     msg.ep = SMC_ENDPOINT;
+     msg.msg = message;
+ 
+-    rtkit_send(smc->rtkit, &msg);
++    return rtkit_send(smc->rtkit, &msg);
+ }
+ 
+ static int smc_cmd(smc_dev_t *smc, u64 message)
+ {
+     u8 id = smc->msgid++ & 0xF;
+-    assert(!smc->outstanding[id]);
++    if (smc->outstanding[id])
++        return -1;
+     smc->outstanding[id] = true;
+ 
+     message |= FIELD_PREP(SMC_MSG_ID, id);
+ 
+-    smc_send(smc, message);
+-    while (smc->outstanding[id])
+-        smc_work(smc);
++    if (!smc_send(smc, message)) {
++        smc->outstanding[id] = false;
++        return -1;
++    }
++    u64 deadline = timeout_calculate(USEC_PER_SEC);
++    while (smc->outstanding[id]) {
++        if (timeout_expired(deadline) || smc_work(smc) < 0) {
++            smc->failed = true;
++            return -1;
++        }
++    }
+ 
+     u64 result = smc->ret[id];
+     u32 ret = FIELD_GET(SMC_RESULT_RESULT, result);
+@@ -112,19 +135,42 @@ static int smc_cmd(smc_dev_t *smc, u64 message)
+     return 0;
+ }
+ 
+-void smc_shutdown(smc_dev_t *smc)
++bool smc_shutdown(smc_dev_t *smc)
+ {
+-    rtkit_quiesce(smc->rtkit);
+-    rtkit_free(smc->rtkit);
++    if (!smc)
++        smc = active_smc;
++    if (!smc)
++        return true;
++    if (smc != active_smc)
++        return false;
++    smc->stopping = true;
++    if (smc->active_calls || smc->initializing)
++        return false;
++    for (unsigned i = 0; i < SMC_NUM_IDS; i++)
++        if (smc->outstanding[i])
++            return false;
++    if (smc->rtkit && smc->boot_attempted && !smc->quiesced) {
++        if (!rtkit_quiesce(smc->rtkit))
++            return false;
++        smc->quiesced = true;
++    }
++    if (!rtkit_free(smc->rtkit))
++        return false;
+     asc_free(smc->asc);
++    active_smc = NULL;
+     free(smc);
++    return true;
+ }
+ 
+ smc_dev_t *smc_init(void)
+ {
++    if (active_smc)
++        return NULL;
+     smc_dev_t *smc = calloc(1, sizeof(smc_dev_t));
+     if (!smc)
+         return NULL;
++    active_smc = smc;
++    smc->active_calls = 1;
+ 
+     smc->asc = asc_init("/arm-io/smc");
+     if (!smc->asc) {
+@@ -135,47 +181,60 @@ smc_dev_t *smc_init(void)
+     smc->rtkit = rtkit_init("smc", smc->asc, NULL, NULL, NULL, true);
+     if (!smc->rtkit) {
+         printf("SMC: failed to initialize RTKit\n");
+-        goto out_asc;
++        goto out_free;
+     }
+ 
++    smc->boot_attempted = true;
+     if (!rtkit_boot(smc->rtkit)) {
+         printf("SMC: failed to boot RTKit\n");
+-        goto out_rtkit;
++        goto out_free;
+     }
+ 
+     if (!rtkit_start_ep(smc->rtkit, SMC_ENDPOINT)) {
+         printf("SMC: failed start SMC endpoint\n");
+-        goto out_rtkit;
++        goto out_free;
+     }
+ 
+     u64 initialize =
+         FIELD_PREP(SMC_MSG_TYPE, SMC_INITIALIZE) | FIELD_PREP(SMC_MSG_ID, smc->msgid++);
+ 
+-    smc_send(smc, initialize);
++    smc->initializing = true;
++    if (!smc_send(smc, initialize)) {
++        smc->initializing = false;
++        goto out_free;
++    }
+ 
++    u64 deadline = timeout_calculate(USEC_PER_SEC);
+     while (!smc->shmem) {
+-        int ret = smc_work(smc);
+-        if (ret < 0)
+-            goto out_rtkit;
++        if (timeout_expired(deadline) || smc_work(smc) < 0)
++            goto out_free;
+     }
+ 
++    smc->active_calls--;
++    if (smc->stopping)
++        goto out_shutdown;
+     return smc;
+ 
+-out_rtkit:
+-    rtkit_free(smc->rtkit);
+-out_asc:
+-    asc_free(smc->asc);
+ out_free:
+-    free(smc);
++    smc->active_calls--;
++out_shutdown:
++    if (!smc_shutdown(smc))
++        printf("SMC: retaining failed initialization\n");
+     return NULL;
+ }
+ 
+ int smc_write_u32(smc_dev_t *smc, u32 key, u32 value)
+ {
++    if (!smc || smc != active_smc || smc->stopping || smc->failed || !smc->shmem ||
++        smc->active_calls)
++        return -1;
++    smc->active_calls++;
+     memcpy(smc->shmem, &value, sizeof(value));
+     u64 msg = FIELD_PREP(SMC_MSG_TYPE, SMC_WRITE_KEY);
+     msg |= FIELD_PREP(SMC_WRITE_KEY_SIZE, sizeof(value));
+     msg |= FIELD_PREP(SMC_WRITE_KEY_KEY, key);
+ 
+-    return smc_cmd(smc, msg);
++    int ret = smc_cmd(smc, msg);
++    smc->active_calls--;
++    return ret;
+ }
+diff --git a/src/smc.h b/src/smc.h
+index 3cb4704..23342d0 100644
+--- a/src/smc.h
++++ b/src/smc.h
+@@ -12,6 +12,8 @@ typedef struct smc_dev smc_dev_t;
+ int smc_write_u32(smc_dev_t *smc, u32 key, u32 value);
+ 
+ smc_dev_t *smc_init(void);
+-void smc_shutdown(smc_dev_t *smc);
++/* NULL addresses retained initialization. False retains ownership and blocks
++ * reuse; published requests without replies require independent safe recovery. */
++bool smc_shutdown(smc_dev_t *smc);
+ 
+ #endif
+diff --git a/src/pmgr.c b/src/pmgr.c
+index 4119f8f..a421f01 100644
+--- a/src/pmgr.c
++++ b/src/pmgr.c
+@@ -351,7 +351,7 @@ int pmgr_reset(int die, const char *name)
+     }
+ 
+     if (!dev)
+-        return -1;
++        return PMGR_RESET_NOT_FOUND;
+ 
+     return pmgr_reset_device(die, dev);
+ }
+diff --git a/src/pmgr.h b/src/pmgr.h
+index ba2ca99..d302886 100644
+--- a/src/pmgr.h
++++ b/src/pmgr.h
+@@ -25,6 +25,8 @@ int pmgr_adt_power_enable_index(const char *path, u32 index);
+ int pmgr_adt_power_disable_index(const char *path, u32 index);
+ int pmgr_adt_reset(const char *path);
+ 
++/* Only pmgr_reset: no matching name, without issuing reset operations. */
++#define PMGR_RESET_NOT_FOUND (-2)
+ int pmgr_reset(int die, const char *name);
+ int pmgr_power_on(int die, const char *name);
+ 
+diff --git a/src/dcp.c b/src/dcp.c
+index 6fa5954..0cd8754 100644
+--- a/src/dcp.c
++++ b/src/dcp.c
+@@ -51,11 +51,14 @@ static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
+ 
+     if (dcp->dp2hdmi_pwr_gpio && dcp->hdmi_pwr_gpio) {
+         smc_dev_t *smc = smc_init();
+-        if (smc) {
+-            smc_write_u32(smc, dcp->dp2hdmi_pwr_gpio, 0x800001);
+-            smc_write_u32(smc, dcp->hdmi_pwr_gpio, 0x800001);
+-            smc_shutdown(smc);
+-        }
++        if (!smc)
++            return -1;
++        int ret = smc_write_u32(smc, dcp->dp2hdmi_pwr_gpio, 0x800001);
++        if (!ret)
++            ret = smc_write_u32(smc, dcp->hdmi_pwr_gpio, 0x800001);
++        bool stopped = smc_shutdown(smc);
++        if (ret || !stopped)
++            return -1;
+     }
+ 
+     dcp->die = cfg->die;
+@@ -273,10 +276,12 @@ int dcp_shutdown(dcp_dev_t *dcp, bool sleep)
+     if (!dcp)
+         dcp = active_dcp;
+     if (!dcp)
+-        return 0;
++        return smc_shutdown(NULL) ? 0 : -1;
+     if (dcp != active_dcp || dcp->reset_failed)
+         return -1;
+     dcp->stopping = true;
++    if (!smc_shutdown(NULL))
++        return -1;
+ 
+     /* dcp/dcp0 on desktop M2 and M2 Pro/Max devices do not wake from sleep */
+     if (dcp_ib_shutdown(dcp->iboot_ep) || dcp_system_shutdown(dcp->system_ep) ||
+diff --git a/src/main.c b/src/main.c
+index d5b4716..5a465b2 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -197,13 +197,12 @@ void m1n1_main(void)
+ #ifndef BRINGUP
+     /* Keep debug transports and exception handling alive if DCP is not safe
+      * to hand over. Do not automatically reboot or tear down more owners. */
+-    while (display_shutdown(DCP_SLEEP_IF_EXTERNAL) || !next_stage.entry) {
++    while (display_shutdown(DCP_SLEEP_IF_EXTERNAL) || !next_stage.entry || !nvme_shutdown()) {
+         printf("Shutdown incomplete or no next stage. Remaining in proxy; no handoff.\n");
+         uartproxy_run(NULL);
+     }
+ #endif
+ 
+-    nvme_shutdown();
+     exception_shutdown();
+ #ifndef BRINGUP
+     usb_iodev_shutdown();
+diff --git a/src/hv.c b/src/hv.c
+index bdad50b..642edd5 100644
+--- a/src/hv.c
++++ b/src/hv.c
+@@ -6,6 +6,7 @@
+ #include "display.h"
+ #include "gxf.h"
+ #include "memory.h"
++#include "nvme.h"
+ #include "pcie.h"
+ #include "smp.h"
+ #include "string.h"
+@@ -62,6 +63,8 @@ int hv_init(void)
+         return -1;
+     if (display_shutdown(DCP_QUIESCED))
+         return -1;
++    if (!nvme_shutdown())
++        return -1;
+     pcie_shutdown();
+     // reenable hpm interrupts for the guest for unused iodevs
+     usb_hpm_restore_irqs(0);
+diff --git a/src/proxy.c b/src/proxy.c
+index 6031810..b3ab7b4 100644
+--- a/src/proxy.c
++++ b/src/proxy.c
+@@ -587,7 +587,7 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+             reply->retval = nvme_init();
+             break;
+         case P_NVME_SHUTDOWN:
+-            nvme_shutdown();
++            reply->retval = nvme_shutdown();
+             break;
+         case P_NVME_READ:
+             reply->retval = nvme_read(request->args[0], request->args[1], (void *)request->args[2]);
+diff --git a/src/chainload.c b/src/chainload.c
+index 1dd7c68..bb8b65f 100644
+--- a/src/chainload.c
++++ b/src/chainload.c
+@@ -126,7 +126,12 @@ int chainload_load(const char *spec, char **vars, size_t var_cnt)
+     }
+ 
+     ret = rust_load_image(spec, &image, &size);
+-    nvme_shutdown();
++    if (!nvme_shutdown()) {
++        if (!ret && size)
++            free(image);
++        printf("chainload: NVMe shutdown incomplete; refusing handoff\n");
++        return -1;
++    }
+     if (ret < 0)
+         return ret;
+ 
+diff --git a/rust/src/nvme.rs b/rust/src/nvme.rs
+index a717860..085c3a9 100644
+--- a/rust/src/nvme.rs
++++ b/rust/src/nvme.rs
+@@ -55,12 +55,13 @@ impl fatfs::Read for NVMEStorage {
+             let off = self.pos as usize % SECTOR_SIZE;
+ 
+             if Some(lba) != self.lba {
+-                self.lba = Some(lba);
+-                let lba = lba + self.offset;
+-                if !unsafe { nvme_read(self.nsid, lba, self.buf.0.as_mut_ptr() as *mut c_void) } {
+-                    println!("nvme_read({}, {}) failed", self.nsid, lba);
++                self.lba = None;
++                let disk_lba = lba + self.offset;
++                if !unsafe { nvme_read(self.nsid, disk_lba, self.buf.0.as_mut_ptr() as *mut c_void) } {
++                    println!("nvme_read({}, {}) failed", self.nsid, disk_lba);
+                     return Err(());
+                 }
++                self.lba = Some(lba);
+             }
+             let copy_len = min(SECTOR_SIZE - off, buf.len());
+             buf[..copy_len].copy_from_slice(&self.buf.0[off..off + copy_len]);
+diff --git a/proxyclient/m1n1/proxyutils.py b/proxyclient/m1n1/proxyutils.py
+index e1ab8f0..978101d 100644
+--- a/proxyclient/m1n1/proxyutils.py
++++ b/proxyclient/m1n1/proxyutils.py
+@@ -431,7 +431,8 @@ class ProxyUtils(Reloadable):
+         return self.get_version(self.adt["/chosen"].system_firmware_version)
+ 
+     def get_gigalocker(self):
+-        self.proxy.nvme_init()
++        if not self.proxy.nvme_init():
++            raise RuntimeError("NVMe initialization failed")
+         self.proxy.read_gigalocker(self.glk_arg_buf)
+         ptr, size = struct.unpack('QQ', self.iface.readmem(self.glk_arg_buf, 16))
+         data = self.iface.readmem(ptr, size)

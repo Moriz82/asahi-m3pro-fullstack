@@ -6,9 +6,11 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 M9_PROJECT_ROOT=$project_root
 source "$project_root/scripts/lib/m9-canonical.sh"
+m9_require_m1_anchor_args "$@"
+shift 4
 output_root=${SOFTWARE_OUTPUT_ROOT:-$project_root/out}
 allowlist="$project_root/config/milestone9-action-allowlist.txt"; denylist="$project_root/config/milestone9-action-denylist.txt"; states="$project_root/config/milestone9-state-transitions.tsv"
-usage() { printf 'usage: %s --release-inputs ABS --release-anchor ABS --plan ABS --plan-anchor ABS --transitions ABS --out ABS\n' "$0" >&2; exit 64; }
+usage() { printf 'usage: %s --expected-target-identity-sha256 HEX --target-readiness-anchors ABS --release-inputs ABS --release-anchor ABS --plan ABS --plan-anchor ABS --transitions ABS --out ABS\n' "$0" >&2; exit 64; }
 [[ $# -eq 12 && $1 == --release-inputs && $3 == --release-anchor && $5 == --plan && $7 == --plan-anchor && $9 == --transitions && ${11} == --out ]] || usage
 release=$2; release_anchor=$4; plan=$6; plan_anchor=$8; transitions=${10}; out=${12}
 for dir in "$release" "$plan"; do evidence_abs_dir "$dir"; done
@@ -24,7 +26,7 @@ evidence_verify_sums "$release" "$release/SHA256SUMS"
 [[ $(evidence_kv "$release/manifest.txt" release_gate) == blocked && $(evidence_kv "$release/manifest.txt" hardware_acceptance) == false ]] || evidence_die 'release must remain blocked'
 [[ $(evidence_kv "$release/manifest.txt" external_anchor_sha256) == "$(evidence_sha256 "$release_anchor")" ]] || evidence_die 'release anchor mismatch'
 [[ $(evidence_kv "$release/manifest.txt" release_input_set_sha256) == "$(evidence_sha256 "$release/release-inputs.tsv")" ]] || evidence_die 'release-input set changed'
-m9_validate_canonical_release_binding "$release" "$release_anchor"
+m9_validate_canonical_release_binding "$release" "$release_anchor" "$M9_EXPECTED_TARGET" "$M9_TARGET_ANCHORS"
 while IFS= read -r -d '' member; do
     rel=${member#"$release"/}
     case $rel in
@@ -36,7 +38,7 @@ while IFS=$'\t' read -r milestone rel expected_hash hw native backup dfu dedicat
     [[ -z ${extra:-} ]] || evidence_die 'invalid release-input row'
     [[ $(evidence_sha256 "$release/manifests/$milestone/manifest.txt") == "$expected_hash" ]] || evidence_die "release manifest changed: $milestone"
 done < <(tail -n +2 "$release/release-inputs.tsv")
-bash "$project_root/scripts/verify-m9-recovery-plan.sh" --plan "$plan" --release-inputs "$release" --release-anchor "$release_anchor" --anchor "$plan_anchor" >/dev/null
+bash "$project_root/scripts/verify-m9-recovery-plan.sh" --expected-target-identity-sha256 "$M9_EXPECTED_TARGET" --target-readiness-anchors "$M9_TARGET_ANCHORS" --plan "$plan" --release-inputs "$release" --release-anchor "$release_anchor" --anchor "$plan_anchor" >/dev/null
 allow=(); deny=()
 while IFS= read -r line || [[ -n $line ]]; do [[ -z $line || $line == \#* ]] && continue; [[ $line != *$'\t'* && $line != *' '* ]] || evidence_die 'invalid allowlist row'; allow+=("$line"); done < "$allowlist"
 while IFS= read -r line || [[ -n $line ]]; do [[ -z $line || $line == \#* ]] && continue; [[ $line != *$'\t'* && $line != *' '* ]] || evidence_die 'invalid denylist row'; deny+=("$line"); done < "$denylist"

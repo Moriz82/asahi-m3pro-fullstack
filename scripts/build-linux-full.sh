@@ -3,14 +3,25 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
+LINUX_COMPONENT=linux-full
+development_framebuffer=0
+case "${1:-}" in
+    '') test "$#" -eq 0 ;;
+    --development-framebuffer) test "$#" -eq 1; development_framebuffer=1 ;;
+    *) printf 'Usage: %s [--development-framebuffer]\n' "$0" >&2; exit 1 ;;
+esac
 readonly source_volume="${SOURCE_VOLUME_OVERRIDE:-${SOURCE_VOLUME}}"
 source "${project_root}/scripts/lib/milestone0-output-root.sh"
 source "${project_root}/scripts/lib/atomic-symlink.sh"
 m0_validate_output_root "$project_root"
+if [[ "$development_framebuffer" = 1 ]]; then
+    source "${project_root}/scripts/lib/linux-development-profile.sh"
+    linux_development_framebuffer_init "$project_root"
+fi
 readonly output_root="$MILESTONE0_OUTPUT_ROOT"
 readonly stage_policy_lib="${project_root}/scripts/lib/milestone0-linux-full-stage.sh"
 readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N8 -tx1 /dev/urandom | tr -d "[:space:]")"
-readonly full_output="${output_root}/milestone0/linux-full"
+readonly full_output="${output_root}/milestone0/${LINUX_COMPONENT}"
 readonly stage="${full_output}/.${run_id}.tmp"
 readonly destination="${full_output}/${run_id}"
 readonly latest="${full_output}/latest"
@@ -75,7 +86,14 @@ docker build --provenance=false \
 test "$(docker volume inspect --format '{{ index .Labels "com.moriz.project" }}' "$source_volume")" = asahi-m3pro-fullstack
 readonly image_id="$(docker image inspect --format '{{.Id}}' "$ARCH_BUILD_IMAGE")"
 
-docker run --rm \
+profile_run_args=(--env "DEVELOPMENT_FRAMEBUFFER=${development_framebuffer}" --env "LINUX_COMPONENT=${LINUX_COMPONENT}")
+if [[ "$development_framebuffer" = 1 ]]; then
+    profile_run_args+=(
+        --mount "type=bind,src=${project_root}/scripts/lib/linux-development-profile.sh,dst=/verify/linux-development-profile.sh,readonly"
+        --mount "type=bind,src=${project_root}/config/linux-development-framebuffer.config,dst=/inputs/development-framebuffer.config,readonly"
+    )
+fi
+docker run --rm "${profile_run_args[@]}" \
     --env "BUILD_IMAGE=${ARCH_BUILD_IMAGE}" --env "BUILD_IMAGE_ID=${image_id}" \
     --env "LINUX_COMMIT=${LINUX_COMMIT}" --env "LINUX_PKGREL=${LINUX_PKGREL}" \
     --env "LINUX_SOURCE_TREE_COMMIT=${LINUX_SOURCE_TREE_COMMIT}" \
@@ -100,8 +118,8 @@ docker run --rm \
         exec 9>/workspace/.milestone0-build.lock
         flock -n 9 || { printf "Another Milestone 0 build owns the source volume\n" >&2; exit 1; }
         readonly repository=/workspace/src/linux
-        readonly component_build=/workspace/build/linux-full
-        readonly output=/out/milestone0/linux-full
+        readonly component_build="/workspace/build/$LINUX_COMPONENT"
+        readonly output="/out/milestone0/$LINUX_COMPONENT"
         readonly run_id="$RUN_ID"
         readonly stage="$output/.${run_id}.tmp"
         readonly destination="$output/${run_id}"
@@ -135,12 +153,18 @@ docker run --rm \
         cp "$component_build/.config" "$stage/defconfig.config"
         test "$(sha256sum "$repository/$LINUX_CONFIG_FRAGMENT" | cut -d " " -f1)" = "$LINUX_CONFIG_FRAGMENT_SHA256"
         KCONFIG_CONFIG="$component_build/.config" "$repository/scripts/kconfig/merge_config.sh" -m "$component_build/.config" "$repository/$LINUX_CONFIG_FRAGMENT"
+        if [[ "$DEVELOPMENT_FRAMEBUFFER" = 1 ]]; then
+            source /verify/linux-development-profile.sh
+            linux_development_framebuffer_fragment /inputs/development-framebuffer.config
+            KCONFIG_CONFIG="$component_build/.config" "$repository/scripts/kconfig/merge_config.sh" -m "$component_build/.config" /inputs/development-framebuffer.config
+            cp /inputs/development-framebuffer.config "$stage/development-fragment"
+        fi
         make -C "$repository" O="$component_build" ARCH=arm64 olddefconfig
         "$repository/scripts/config" --file "$component_build/.config" --disable LOCALVERSION_AUTO --set-str LOCALVERSION "$LINUX_LOCALVERSION"
         make -C "$repository" O="$component_build" ARCH=arm64 olddefconfig
         make -C "$repository" O="$component_build" ARCH=arm64 rustavailable 2>&1 | tee "$stage/rustavailable.log"
         make -C "$repository" O="$component_build" ARCH=arm64 listnewconfig 2>&1 | tee "$stage/listnewconfig.log"
-        ! grep -q "^CONFIG_" "$stage/listnewconfig.log"
+        if grep -q "^CONFIG_" "$stage/listnewconfig.log"; then exit 1; fi
         {
             for setting in \
                 CONFIG_ARM64=y CONFIG_ARCH_APPLE=y CONFIG_ARM64_16K_PAGES=y \
@@ -163,6 +187,9 @@ docker run --rm \
                 grep -Fx "$setting" "$component_build/.config"
             done
         } > "$stage/config-assertions.txt"
+        if [[ "$DEVELOPMENT_FRAMEBUFFER" = 1 ]]; then
+            linux_development_framebuffer_config "$component_build/.config" "$stage/development-fragment" > "$stage/development-config-assertions.txt"
+        fi
         diff -u "$stage/defconfig.config" "$component_build/.config" > "$stage/defconfig.diff" || :
         printf "%s  %s\n" "$(sha256sum "$component_build/.config" | cut -d " " -f1)" config > "$stage/config-merged.sha256"
         readonly diagnostic_pattern="warning:|Warning:|Warning \\(|error:|Error:|Error \\(|\\[(warning|error)\\]|Missing .* constraint|failed to match any schema|\\.dtb: "
@@ -221,7 +248,7 @@ docker run --rm \
             capture { print }
             END { if (!seen || !terminated) exit 1 }
         '\'' "$stage/target-dtbs-check.raw.log" \
-            | sed -E "s#/workspace/src/linux/##g; s#/workspace/build/linux-full/##g" \
+            | sed -E "s#/workspace/src/linux/##g; s#$component_build/##g" \
             > "$stage/target-dtbs-check.log"
         test "$(wc -l < "$stage/target-dtbs-check.log")" -eq "$LINUX_TARGET_DT_DIAGNOSTICS_LINES"
         test "$(sha256sum "$stage/target-dtbs-check.log" | cut -d " " -f1)" = "$LINUX_TARGET_DT_DIAGNOSTICS_SHA256"
@@ -299,21 +326,28 @@ docker run --rm \
         make -s -C "$repository" O="$component_build" ARCH=arm64 kernelrelease > "$stage/kernelrelease"
         pacman -Q | LC_ALL=C sort > "$stage/packages.txt"
         {
-        printf "format=1\nbuilt_utc=%s\ntarget=Mac15,6/J514s/T6030\ncomponent=linux-full\nsource_url=%s\nsource_commit=%s\nsource_tree_commit=%s\nsource_ref=%s\nupstream_url=%s\nupstream_ref=%s\nupstream_commit=%s\nsource_clean=true\nsource_date_epoch=%s\nlinux_config_fragment_sha256=%s\nconfig_fragment=%s\nlinux_patch_series=%s\nlinux_patch_series_sha256=%s\ndefconfig=%s\nlocalversion=%s\nworkspace_filesystem=%s\nbuild_environment=archlinuxarm-native\nrust_version=%s\nrustup_version=%s\nrustup_init_sha256=%s\ncontainer_image=%s\ncontainer_image_id=%s\ncompiler=%s\nlinker=%s\nwarning_policy=W=1-diagnostic\ndt_schema_files=unfiltered\ndtbs_list_policy=normalized-kernel-dtbs-list\ndtbs_inventory_policy=raw-build-superset\ndtbs_install_policy=native-make-dtbs_install\ndtbs_install_inventory_policy=installed-equals-dtbs-list\ndtbs_install_byte_equality=true\ntarget_diagnostics_policy=pinned-known-baseline\ntarget_diagnostics_sha256=%s\ntarget_diagnostics_lines=%s\ntarget_diagnostic_fingerprints=%s\ndtschema_version=%s\nconfig_merged_sha256=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LINUX_URL" "$LINUX_COMMIT" "$source_tree_commit" "$LINUX_REF" "$LINUX_UPSTREAM_URL" "$LINUX_UPSTREAM_REF" "$LINUX_UPSTREAM_COMMIT" "$source_epoch" "$LINUX_CONFIG_FRAGMENT_SHA256" "$LINUX_CONFIG_FRAGMENT" "$LINUX_PATCH_SERIES" "$LINUX_PATCH_SERIES_SHA256" "$LINUX_DEFCONFIG" "$LINUX_LOCALVERSION" "$filesystem_type" "$RUST_VERSION" "$RUSTUP_VERSION" "$RUSTUP_INIT_SHA256" "$BUILD_IMAGE" "$BUILD_IMAGE_ID" "$(gcc --version | head -n 1)" "$(ld --version | head -n 1)" "$LINUX_TARGET_DT_DIAGNOSTICS_SHA256" "$LINUX_TARGET_DT_DIAGNOSTICS_LINES" "$LINUX_TARGET_DT_DIAGNOSTICS_FINGERPRINTS" "$dtschema_version" "$(sha256sum "$component_build/.config" | cut -d " " -f1)"
+        printf "format=1\nbuilt_utc=%s\ntarget=Mac15,6/J514s/T6030\ncomponent=%s\nsource_url=%s\nsource_commit=%s\nsource_tree_commit=%s\nsource_ref=%s\nupstream_url=%s\nupstream_ref=%s\nupstream_commit=%s\nsource_clean=true\nsource_date_epoch=%s\nlinux_config_fragment_sha256=%s\nconfig_fragment=%s\nlinux_patch_series=%s\nlinux_patch_series_sha256=%s\ndefconfig=%s\nlocalversion=%s\nworkspace_filesystem=%s\nbuild_environment=archlinuxarm-native\nrust_version=%s\nrustup_version=%s\nrustup_init_sha256=%s\ncontainer_image=%s\ncontainer_image_id=%s\ncompiler=%s\nlinker=%s\nwarning_policy=W=1-diagnostic\ndt_schema_files=unfiltered\ndtbs_list_policy=normalized-kernel-dtbs-list\ndtbs_inventory_policy=raw-build-superset\ndtbs_install_policy=native-make-dtbs_install\ndtbs_install_inventory_policy=installed-equals-dtbs-list\ndtbs_install_byte_equality=true\ntarget_diagnostics_policy=pinned-known-baseline\ntarget_diagnostics_sha256=%s\ntarget_diagnostics_lines=%s\ntarget_diagnostic_fingerprints=%s\ndtschema_version=%s\nconfig_merged_sha256=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LINUX_COMPONENT" "$LINUX_URL" "$LINUX_COMMIT" "$source_tree_commit" "$LINUX_REF" "$LINUX_UPSTREAM_URL" "$LINUX_UPSTREAM_REF" "$LINUX_UPSTREAM_COMMIT" "$source_epoch" "$LINUX_CONFIG_FRAGMENT_SHA256" "$LINUX_CONFIG_FRAGMENT" "$LINUX_PATCH_SERIES" "$LINUX_PATCH_SERIES_SHA256" "$LINUX_DEFCONFIG" "$LINUX_LOCALVERSION" "$filesystem_type" "$RUST_VERSION" "$RUSTUP_VERSION" "$RUSTUP_INIT_SHA256" "$BUILD_IMAGE" "$BUILD_IMAGE_ID" "$(gcc --version | head -n 1)" "$(ld --version | head -n 1)" "$LINUX_TARGET_DT_DIAGNOSTICS_SHA256" "$LINUX_TARGET_DT_DIAGNOSTICS_LINES" "$LINUX_TARGET_DT_DIAGNOSTICS_FINGERPRINTS" "$dtschema_version" "$(sha256sum "$component_build/.config" | cut -d " " -f1)"
         } > "$stage/manifest.txt"
         printf "dtbs_install_subset_policy=kernel-install-subset\n" >> "$stage/manifest.txt"
         printf "headers_evidence_policy=deterministic-headers-tar\nheaders_archive_policy=gnu-tar-sort-name-source-epoch-numeric-root\nheaders_archive_root=usr/include\nheaders_inventory_policy=sorted-regular-members\nheaders_source_filesystem=ext4-docker-volume\nheaders_install_fresh_root=true\nheaders_archive_byte_stable=true\n" >> "$stage/manifest.txt"
         printf "artifact_symlink_policy=none-portable-handoff\n" >> "$stage/manifest.txt"
+        if [[ "$DEVELOPMENT_FRAMEBUFFER" = 1 ]]; then
+            printf "development_profile=framebuffer-v1\ncanonical_m0=false\nhardware_acceptance=false\nboot_authorized=false\ndevelopment_fragment_sha256=%s\n" "$LINUX_DEVELOPMENT_FRAGMENT_SHA256" >> "$stage/manifest.txt"
+        fi
         file "$stage/Image" "$stage/vmlinux" "$stage/dtbs/apple/t6030-j514s.dtb" > "$stage/file.txt"
         test -z "$(find -P "$stage" -mindepth 1 -type d -empty -print -quit)"
         (cd "$stage"; find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS)
     '
 
-"${project_root}/scripts/verify-linux-full.sh" "$stage"
+if [[ "$development_framebuffer" = 1 ]]; then
+    "${project_root}/scripts/verify-linux-full.sh" "$stage" --development-framebuffer
+else
+    "${project_root}/scripts/verify-linux-full.sh" "$stage"
+fi
 if [[ -e "$destination" || -L "$destination" ]]; then
     printf 'Refusing colliding linux-full destination for run %s\n' "$run_id" >&2
     exit 1
 fi
 mv "$stage" "$destination"
 atomic_symlink_replace "$run_id" "$latest" "$latest_tmp"
-printf 'linux-full.baseline=%s\n' "$destination"
+printf '%s.baseline=%s\n' "$LINUX_COMPONENT" "$destination"

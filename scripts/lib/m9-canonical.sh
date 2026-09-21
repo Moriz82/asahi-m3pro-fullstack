@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 # Shared M9 canonical-release provenance checks.
+m9_require_m1_anchor_args() {
+    [[ $# -ge 4 && $1 == --expected-target-identity-sha256 && $3 == --target-readiness-anchors &&
+       $2 =~ ^[0-9a-f]{64}$ && $4 == /* ]] || {
+        evidence_die 'M9 requires explicit M1 target identity and independent readiness anchors'; return 1;
+    }
+    M9_EXPECTED_TARGET=$2
+    M9_TARGET_ANCHORS=$4
+    evidence_abs_regular "$M9_TARGET_ANCHORS"
+}
+
 m9_validate_canonical_release_binding() {
     local release=$1 anchor=$2 map inputs header milestone rel manifest_hash handoff_hash release_set
     local hardware_acceptance native_readiness backup_recovery dfu dedicated_hardware extra index entry
+    local expected_target=$3 target_anchors=$4
     evidence_abs_regular "$release/manifest.txt"
     evidence_abs_regular "$release/identity.txt"
     evidence_abs_regular "$release/release-inputs.tsv"
@@ -43,7 +54,13 @@ m9_validate_canonical_release_binding() {
         [[ $(evidence_sha256 "$release/$rel") == "$manifest_hash" ]] || evidence_die "canonical manifest map hash mismatch: $milestone"
         evidence_abs_dir "$release/handoffs/$milestone"
         [[ $(evidence_sha256 "$release/handoffs/$milestone/manifest.txt") == "$manifest_hash" ]] || evidence_die "standalone canonical manifest differs from handoff: $milestone"
-        MILESTONE_HANDOFF_ROOT="$release/handoffs" bash "$M9_PROJECT_ROOT/scripts/verify-milestone-handoff.sh" --bundle "$release/handoffs/$milestone" >/dev/null
+        if [[ $milestone == M1 ]]; then
+            MILESTONE_HANDOFF_ROOT="$release/handoffs" bash "$M9_PROJECT_ROOT/scripts/verify-milestone-handoff.sh" \
+                --bundle "$release/handoffs/$milestone" --expected-target-identity-sha256 "$expected_target" \
+                --target-readiness-anchors "$target_anchors" >/dev/null
+        else
+            MILESTONE_HANDOFF_ROOT="$release/handoffs" bash "$M9_PROJECT_ROOT/scripts/verify-milestone-handoff.sh" --bundle "$release/handoffs/$milestone" >/dev/null
+        fi
         [[ $(evidence_sha256 "$release/handoffs/$milestone/SHA256SUMS") == "$handoff_hash" ]] || evidence_die "canonical handoff map bundle mismatch: $milestone"
         [[ $(evidence_kv "$anchor" "${milestone}_handoff_sha256") == "$handoff_hash" ]] || evidence_die "canonical handoff anchor mismatch: $milestone"
         [[ $(evidence_kv "$release/manifest.txt" "${milestone}_handoff_sha256") == "$handoff_hash" ]] || evidence_die "canonical release handoff mismatch: $milestone"

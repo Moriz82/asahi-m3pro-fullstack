@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   static:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -18,12 +21,30 @@ jobs:
           docker build --pull=false -f build/Containerfile.static -t asahi-m3pro-static:ci .
       - name: Run static aggregate
         run: |
-          docker run --rm --read-only --tmpfs /tmp:rw,nosuid,exec,size=1g \
+          docker run --rm --network none --read-only --cap-drop MKNOD --tmpfs /tmp:rw,nosuid,exec,size=1g \
             -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
             --entrypoint /bin/bash asahi-m3pro-static:ci -lc '
               TEST_OUTPUT_ROOT=/tmp/asahi-static/tests \
+              M1_INIT_RUNTIME_REQUIRED=1 \
               MILESTONE_EVIDENCE_ROOT=/tmp/asahi-static/milestones \
               RE_EVIDENCE_ROOT=/tmp/asahi-static/re \
               MILESTONE_HANDOFF_ROOT=/tmp/asahi-static/handoffs \
                 ./scripts/verify-all-software-tooling.sh --static
+            '
+
+  signed-repositories:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Test signed repositories and rollback with the pinned Arch base
+        # Same immutable base as Containerfile.arch; no Rust/kernel build needed.
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,exec,size=1g \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            --entrypoint /bin/bash \
+            menci/archlinuxarm@sha256:55b83fc04a09f1e2e08644b4548b95c974ed1108fa8f0a34647af36a4b1c7f60 \
+            -Eeuo pipefail -c '
+              tests/m8-signed-repo-self-test.sh
+              tests/m8-signed-rollback-bundle-self-test.sh
             '

@@ -6,9 +6,11 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 M9_PROJECT_ROOT=$project_root
 source "$project_root/scripts/lib/m9-canonical.sh"
+m9_require_m1_anchor_args "$@"
+shift 4
 output_root=${SOFTWARE_OUTPUT_ROOT:-$project_root/out}
 usage() {
-    printf '       %s --handoffs-root ABS --anchor ABS --out ABS\n' "$0" >&2
+    printf '       %s --expected-target-identity-sha256 HEX --target-readiness-anchors ABS --handoffs-root ABS --anchor ABS --out ABS\n' "$0" >&2
     exit 64
 }
 copy_tree() {
@@ -70,7 +72,12 @@ validate_canonical_handoffs() {
     done < <(find -P "$handoffs" -mindepth 1 -maxdepth 1 -print0)
     for milestone in "${expected[@]}"; do
         source="$stage/handoffs/$milestone"
-        MILESTONE_HANDOFF_ROOT="$stage/handoffs" bash "$project_root/scripts/verify-milestone-handoff.sh" --bundle "$source" >/dev/null
+        if [[ $milestone == M1 ]]; then
+            MILESTONE_HANDOFF_ROOT="$stage/handoffs" bash "$project_root/scripts/verify-milestone-handoff.sh" --bundle "$source" \
+                --expected-target-identity-sha256 "$M9_EXPECTED_TARGET" --target-readiness-anchors "$M9_TARGET_ANCHORS" >/dev/null
+        else
+            MILESTONE_HANDOFF_ROOT="$stage/handoffs" bash "$project_root/scripts/verify-milestone-handoff.sh" --bundle "$source" >/dev/null
+        fi
         [[ $(evidence_kv "$source/manifest.txt" milestone) == "$milestone" ]] || evidence_die "handoff milestone mismatch: $milestone"
         hash=$(evidence_sha256 "$source/SHA256SUMS")
         [[ $(evidence_kv "$stage/anchor.txt" "${milestone}_handoff_sha256") == "$hash" ]] || evidence_die "external handoff hash mismatch: $milestone"

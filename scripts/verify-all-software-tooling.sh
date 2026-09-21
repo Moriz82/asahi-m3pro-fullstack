@@ -17,7 +17,8 @@ contract_rows=$(awk -F '\t' '
     NF != 5 || $1 !~ /^M[0-9]$/ || $2 !~ /^(none|M[0-8])$/ ||
         $3 == "" || $4 == "" || $5 == "" { invalid=1; next }
     {
-        if (++seen[$1] != 1 || $1 != expected[count]) invalid=1
+        predecessor = count == 0 ? "none" : expected[count-1]
+        if (++seen[$1] != 1 || $1 != expected[count] || $2 != predecessor) invalid=1
         print $1 "\t" $2
         count++
     }
@@ -42,14 +43,33 @@ export SOFTWARE_OUTPUT_ROOT="$test_root"
 export MILESTONE1_OUTPUT_ROOT="$test_root/m1"
 export M0_INTEGRITY_REAL=0
 scripts=()
-while IFS= read -r script; do scripts+=("$script"); done < <(find "$project_root/scripts" -type f -name '*.sh' -print | sort)
+while IFS= read -r script; do scripts+=("$script"); done < <(find "$project_root/scripts" "$project_root/tests" -type f -name '*.sh' -print | LC_ALL=C sort)
 ((${#scripts[@]} > 0))
-bash -n "${scripts[@]}"
+for script in "${scripts[@]}" "$project_root"/config/*.env; do bash -n "$script"; done
+sh -n "$project_root/initramfs/milestone1/init"
 shellcheck --severity=error "${scripts[@]}"
+shellcheck -s sh --severity=error "$project_root/initramfs/milestone1/init"
+printf 'syntax_checked=%s_shell_files_plus_config_and_init\n' "${#scripts[@]}"
+passed=0
 for test_script in "$project_root"/scripts/test-*.sh; do
     [[ -f $test_script ]] || continue
-    "$test_script" >/dev/null
+    log="$test_root/$(basename "$test_script").log"
+    if "$test_script" >"$log" 2>&1; then
+        printf 'PASS %s\n' "${test_script##*/}"
+        grep -E '^(SKIP |.* skipped:)' "$log" || :
+        passed=$((passed + 1))
+    else
+        printf 'FAIL %s (log: %s)\n' "${test_script##*/}" "$log" >&2
+        tail -40 "$log" >&2
+        exit 1
+    fi
 done
+printf 'fixture_suites_passed=%s\n' "$passed"
+printf 'signed_fixture_suites=separate_CI_job_requires_pinned_Arch_repo_add_7_1\n'
+printf 'source_contract_suites=not-run_requires_clean_pinned_source_and_M0_artifacts\n'
+printf 'u_boot_artifact_suite=not-run_requires_M0_artifacts\n'
+printf 'bootloader_source_suite=not-run_requires_pinned_m1n1_and_U_Boot_sources_and_AArch64_builder\n'
+printf 'm2_driver_source_suite=not-run_requires_clean_pinned_Linux_and_AArch64_builder\n'
 for index in "${!milestones[@]}"; do
     milestone=${milestones[index]}
     predecessor=${predecessors[index]}

@@ -1,0 +1,70 @@
+Subject: [PATCH 26] proxyclient: correct 23J220 D589 completion decoding
+
+Development-only, against m1n1 pin 60e53e7078c5cb7efce32d64bf50829e9401e44f
+plus Python patches 01/04/05/06/07/09/25. Exact firmware sender 0x13ead8
+has 34-byte completion data, eight 216-byte records, count and a second
+boolean. Gate to V14_7; preserve older/future schemas. Make the real manager
+consume the parsed blob and reject malformed target completion lengths.
+No native experiment or selected boot-builder change.
+
+diff --git a/proxyclient/m1n1/fw/dcp/ipc.py b/proxyclient/m1n1/fw/dcp/ipc.py
+--- a/proxyclient/m1n1/fw/dcp/ipc.py
++++ b/proxyclient/m1n1/fw/dcp/ipc.py
+@@ -426,10 +426,10 @@
+ 
+ BufferDescriptor = uint64_t
+ 
+-SwapCompleteData = Bytes(0x12)
++SwapCompleteData = Bytes(0x22 if Ver.check("V == V14_7") else 0x12)
+ SwapInfoBlob = Struct(
+-    "unk" / Bytes(0x6c4),
+-    Ver("V >= V13_5", "unk_13_3" / Bytes(0x10)),
++    "unk" / Bytes(0x6c0 if Ver.check("V == V14_7") else 0x6c4),
++    Ver("V >= V13_5 && V != V14_7", "unk_13_3" / Bytes(0x10)),
+ )
+ 
+ SWAP_SURFACES = 4
+@@ -931,7 +931,11 @@
+     D584 = Callback(void, "clear_default_surface")
+ 
+     D588 = Callback(void, "resize_default_fb_surface_gated")
+-    D589 = Callback(void, "swap_complete_ap_gated", swap_id=uint, unkBool=bool_, swap_data=InPtr(SwapCompleteData), swap_info=SwapInfoBlob, unkUint=uint)
++    if Ver.check("V == V14_7"):
++        # 23J220: 34-byte data, eight 216-byte records, record count, flag.
++        D589 = Callback(void, "swap_complete_ap_gated", swap_id=uint, unkBool=bool_, swap_data=InPtr(SwapCompleteData), swap_info=SwapInfoBlob, unkUint=uint, unkBool2=bool_)
++    else:
++        D589 = Callback(void, "swap_complete_ap_gated", swap_id=uint, unkBool=bool_, swap_data=InPtr(SwapCompleteData), swap_info=SwapInfoBlob, unkUint=uint)
+ 
+     D591 = Callback(void, "swap_complete_intent_gated", swap_id=uint, unkB=bool_, unkInt=uint32_t, width=uint, height=uint)
+     D592 = Callback(void, "abort_swap_ap_gated", swap_id=uint)
+diff --git a/proxyclient/m1n1/fw/dcp/manager.py b/proxyclient/m1n1/fw/dcp/manager.py
+--- a/proxyclient/m1n1/fw/dcp/manager.py
++++ b/proxyclient/m1n1/fw/dcp/manager.py
+@@ -38,6 +38,11 @@
+ 
+         if func is None:
+             raise Exception(f"Unimplemented callback {method!s} [{state.tag}]")
++
++        if (state.tag == "D589" and ipc.Ver.check("V == V14_7") and
++                (state.in_len != method.in_struct.sizeof() or
++                 len(state.in_data) != state.in_len or state.out_len != 0)):
++            raise ValueError("Invalid swap completion callback size")
+ 
+         self.in_callback += 1
+         try:
+@@ -106,12 +111,12 @@
+ 
+     setProperty_dict = setProperty_int = setProperty_bool = setProperty_str = setProperty
+ 
+-    def swap_complete_ap_gated(self, swap_id, unkBool, swap_data, swap_info, unkUint):
++    def swap_complete_ap_gated(self, swap_id, unkBool, swap_data, swap_info, unkUint, unkBool2=None):
+         swap_data_ptr = "NULL" if swap_data is None else "..."
+-        print(f"swap_complete_ap_gated({swap_id}, {unkBool}, {swap_data_ptr}, ..., {unkUint}")
++        print(f"swap_complete_ap_gated({swap_id}, {unkBool}, {swap_data_ptr}, ..., {unkUint}, {unkBool2})")
+         if swap_data is not None:
+             chexdump(swap_data)
+-        chexdump(swap_info)
++        chexdump(swap_info if isinstance(swap_info, bytes) else ipc.SwapInfoBlob.build(swap_info))
+         self.swaps += 1
+         self.frame = swap_id
+ 

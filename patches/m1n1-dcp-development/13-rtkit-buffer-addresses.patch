@@ -1,0 +1,209 @@
+diff --git a/src/rtkit.c b/src/rtkit.c
+index ef148d4..c1a2787 100644
+--- a/src/rtkit.c
++++ b/src/rtkit.c
+@@ -70,8 +70,6 @@
+ #define RTKIT_MIN_VERSION 11
+ #define RTKIT_MAX_VERSION 12
+ 
+-#define IOVA_MASK GENMASK(35, 0)
+-
+ enum rtkit_power_state {
+     RTKIT_POWER_OFF = 0x00,
+     RTKIT_POWER_SLEEP = 0x01,
+@@ -192,9 +190,29 @@ bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg)
+     return asc_send(rtk->asc, &asc_msg);
+ }
+ 
++static bool rtkit_buffer_size(size_t *sz)
++{
++    if (!*sz || *sz > (size_t)-1 - (SZ_16K - 1))
++        return false;
++    *sz = ALIGN_UP(*sz, SZ_16K);
++    return true;
++}
++
++/* asc-dram-mask contains tags, not a limit on the DART's address width.
++ * A tagged encoding must remain reversible over the entire buffer. */
++static bool rtkit_dart_range(rtkit_dev_t *rtk, u64 iova, size_t sz)
++{
++    if (!sz || sz - 1 > (u64)-1 - iova || (iova & rtk->dva_base))
++        return false;
++    u64 first_tag = rtk->dva_base & -rtk->dva_base;
++    return !first_tag || sz <= first_tag - (iova & (first_tag - 1));
++}
++
+ bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
+ {
+-    sz = ALIGN_UP(sz, 16384);
++    if (!phys || !dva || ((u64)phys & (SZ_16K - 1)) || !rtkit_buffer_size(&sz) ||
++        sz - 1 > (u64)-1 - (u64)phys)
++        return false;
+ 
+     if (rtk->sart) {
+         if (!sart_add_allowed_region(rtk->sart, phys, sz)) {
+@@ -210,7 +228,8 @@ bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
+             return false;
+         }
+ 
+-        if (dart_map(rtk->dart, iova, phys, sz) < 0) {
++        if (!rtkit_dart_range(rtk, iova, sz) || (iova & (SZ_16K - 1)) ||
++            dart_map(rtk->dart, iova, phys, sz) < 0) {
+             rtkit_printf("failed to DART map %p -> 0x%lx (0x%lx)\n", phys, iova, sz);
+             iova_free(rtk->dart_iovad, iova, sz);
+             return false;
+@@ -226,14 +245,20 @@ bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
+ 
+ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
+ {
++    if (!rtkit_buffer_size(&sz))
++        return false;
+     if (rtk->sart) {
+-        if (!sart_remove_allowed_region(rtk->sart, (void *)dva, sz))
++        if (!sart_remove_allowed_region(rtk->sart, (void *)dva, sz)) {
+             rtkit_printf("sart_remove_allowed_region failed (0x%lx, 0x%lx)\n", dva, sz);
++            return false;
++        }
+         return true;
+     } else if (rtk->dart) {
+         dva &= ~rtk->dva_base;
+-        dart_unmap(rtk->dart, dva & IOVA_MASK, sz);
+-        iova_free(rtk->dart_iovad, dva & IOVA_MASK, sz);
++        if ((dva & (SZ_16K - 1)) || !rtkit_dart_range(rtk, dva, sz))
++            return false;
++        dart_unmap(rtk->dart, dva, sz);
++        iova_free(rtk->dart_iovad, dva, sz);
+         return true;
+     } else {
+         rtkit_printf("TODO: implement no IOMMU buffers\n");
+@@ -243,37 +268,36 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
+ 
+ bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz)
+ {
+-    bfr->bfr = memalign(SZ_16K, sz);
+-    if (!bfr->bfr) {
++    if (bfr->bfr || bfr->owned || !rtkit_buffer_size(&sz))
++        return false;
++    struct rtkit_buffer allocated = {.sz = sz, .owned = true};
++    allocated.bfr = memalign(SZ_16K, sz);
++    if (!allocated.bfr) {
+         rtkit_printf("unable to allocate %zu buffer\n", sz);
+         return false;
+     }
+ 
+-    sz = ALIGN_UP(sz, 16384);
+-
+-    bfr->sz = sz;
+-    if (!rtkit_map(rtk, bfr->bfr, sz, &bfr->dva))
+-        goto error;
+-
++    if (!rtkit_map(rtk, allocated.bfr, sz, &allocated.dva)) {
++        free(allocated.bfr);
++        return false;
++    }
++    *bfr = allocated;
+     return true;
+-
+-error:
+-    free(bfr->bfr);
+-    bfr->bfr = NULL;
+-    return false;
+ }
+ 
+ bool rtkit_free_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr)
+ {
+-    if (!bfr->bfr || !is_heap(bfr->bfr))
++    if (!bfr->owned) {
++        *bfr = (struct rtkit_buffer){0};
+         return true;
++    }
+ 
+     if (!rtkit_unmap(rtk, bfr->dva, bfr->sz))
+         return false;
+ 
+     free(bfr->bfr);
+-
+-    return false;
++    *bfr = (struct rtkit_buffer){0};
++    return true;
+ }
+ 
+ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *msg,
+@@ -283,27 +307,34 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
+     size_t sz = n_4kpages << 12;
+     u64 addr = FIELD_GET(MSG_BUFFER_REQUEST_IOVA, msg->msg);
+ 
++    if (!sz || bfr->bfr || bfr->owned || sz - 1 > MSG_BUFFER_REQUEST_IOVA - addr)
++        return false;
++
+     if (rtk->sram) {
+         if (!addr) {
+             rtkit_printf("SRAM buffers needs to be provided by the IOP\n");
+             return false;
+         }
+-        bfr->dva = addr;
+-        bfr->bfr = (void *)addr;
+-        bfr->sz = sz;
++        *bfr = (struct rtkit_buffer){.dva = addr, .bfr = (void *)addr, .sz = sz};
+         return true;
+     } else if (addr) {
+-        bfr->dva = addr & ~rtk->dva_base;
+-        bfr->sz = sz;
+-        bfr->bfr = dart_translate(rtk->dart, bfr->dva & IOVA_MASK);
+-        if (!bfr->bfr) {
++        u64 iova = addr & ~rtk->dva_base;
++        if (!rtk->dart || !rtkit_dart_range(rtk, iova, sz))
++            return false;
++        void *phys = dart_translate(rtk->dart, iova);
++        if (!phys || sz - 1 > (u64)-1 - (u64)phys) {
+             rtkit_printf("failed to translate pre-allocated buffer (ep 0x%x, buf 0x%lx)\n", msg->ep,
+                          addr);
+             return false;
+-        } else {
+-            rtkit_printf("pre-allocated buffer (ep 0x%x, dva 0x%lx, phys %p)\n", msg->ep, addr,
+-                         bfr->bfr);
+         }
++        /* A CPU pointer is usable only if every DART page is contiguous. */
++        for (size_t off = SZ_16K - (iova & (SZ_16K - 1)); off < sz; off += SZ_16K) {
++            if ((u64)dart_translate(rtk->dart, iova + off) != (u64)phys + off)
++                return false;
++        }
++        *bfr = (struct rtkit_buffer){.dva = addr, .bfr = phys, .sz = sz};
++        rtkit_printf("pre-allocated buffer (ep 0x%x, dva 0x%lx, phys %p)\n", msg->ep, addr,
++                     bfr->bfr);
+         return true;
+ 
+     } else {
+@@ -313,12 +344,17 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
+         }
+     }
+ 
++    u64 wire_dva = bfr->dva | rtk->dva_base;
++    if (wire_dva > MSG_BUFFER_REQUEST_IOVA || sz - 1 > MSG_BUFFER_REQUEST_IOVA - wire_dva) {
++        rtkit_printf("buffer address does not fit RTKit request\n");
++        rtkit_free_buffer(rtk, bfr);
++        return false;
++    }
+     struct asc_message reply;
+     reply.msg1 = msg->ep;
+     reply.msg0 = FIELD_PREP(MGMT_TYPE, MSG_BUFFER_REQUEST);
+     reply.msg0 |= FIELD_PREP(MSG_BUFFER_REQUEST_SIZE, n_4kpages);
+-    if (!addr)
+-        reply.msg0 |= FIELD_PREP(MSG_BUFFER_REQUEST_IOVA, bfr->dva | rtk->dva_base);
++    reply.msg0 |= FIELD_PREP(MSG_BUFFER_REQUEST_IOVA, wire_dva);
+ 
+     if (!asc_send(rtk->asc, &reply)) {
+         rtkit_printf("unable to send buffer reply\n");
+diff --git a/src/rtkit.h b/src/rtkit.h
+index 8461875..85badd5 100644
+--- a/src/rtkit.h
++++ b/src/rtkit.h
+@@ -20,6 +20,8 @@ struct rtkit_buffer {
+     void *bfr;
+     u64 dva;
+     size_t sz;
++    /* Only buffers allocated by rtkit_alloc_buffer may be unmapped/freed. */
++    bool owned;
+ };
+ 
+ rtkit_dev_t *rtkit_init(const char *name, asc_dev_t *asc, dart_dev_t *dart,

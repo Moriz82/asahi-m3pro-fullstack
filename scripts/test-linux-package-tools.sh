@@ -39,7 +39,7 @@ grep -Fq 'm0_package_closure_add_makepkg_metadata' "${project_root}/scripts/pack
 grep -Fq 'm0_archive_closure_verify' "${project_root}/scripts/verify-linux-package.sh"
 grep -Fq '[[ $arch_image_id =~ ^sha256:[0-9a-f]{64}$ && $arch_image_id == "$full_image_id" ]]' \
     "${project_root}/scripts/verify-linux-package.sh"
-grep -Fq 'docker image inspect "$arch_image_id"' "${project_root}/scripts/verify-linux-package.sh"
+grep -Fq 'm0_inspection_run "$evidence_abs" "$package_root_abs" "$arch_image_id"' "${project_root}/scripts/verify-linux-package.sh"
 grep -Fq 'sed -n "s/^pkgname = //p"' "$package_script"
 ! grep -Fq "sed -n 's/^pkgname = //p'" "$package_script"
 

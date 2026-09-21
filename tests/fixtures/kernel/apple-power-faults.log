@@ -1,0 +1,7 @@
+[    2.000001] apple-pmgr-pwrstate test-pmgr: PS test-domain: powering off with RESET active
+[    2.000002] apple-pmgr-pwrstate test-pmgr: PS test-domain: Failed to set reset/disable bits (now: 0x0)
+[    2.000003] apple-pmgr-pwrstate test-pmgr: PS test-domain: Failed to reach power state 0xf (now: 0x0)
+[    2.000004] apple-pmgr-pwrstate test-pmgr: PS 0x0: asserting RESET while powered down
+[    2.000005] apple-pmgr-pwrstate test-pmgr: PS 0x0: RESET was deasserted while powered down
+[    2.000006] apple-dart test-dart: busy bit did not clear after command 1 for streams 1
+[    2.000007] apple-dart test-dart: busy bit did not clear after command 1 for stream 0

@@ -5,17 +5,25 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/config/milestones.env"
 source "$project_root/scripts/lib/evidence.sh"
 source "$project_root/scripts/lib/milestone0-components.sh"
-usage() { printf 'usage: %s --milestone M0..M8 --source ABS --out ABS\n' "$0" >&2; exit 64; }
-milestone='' source='' out=''
+usage() { printf 'usage: %s --milestone M0..M8 --source ABS --out ABS [M1: --expected-target-identity-sha256 HEX --target-readiness-anchors ABS]\n' "$0" >&2; exit 64; }
+milestone='' source='' out='' expected_target='' anchors_file=''
 while (($#)); do
     case $1 in
         --milestone) [[ $# -ge 2 ]] || usage; milestone=$2; shift 2;;
         --source|--input) [[ $# -ge 2 ]] || usage; source=$2; shift 2;;
         --out) [[ $# -ge 2 ]] || usage; out=$2; shift 2;;
+        --expected-target-identity-sha256) [[ $# -ge 2 && -z $expected_target ]] || usage; expected_target=$2; shift 2;;
+        --target-readiness-anchors) [[ $# -ge 2 && -z $anchors_file ]] || usage; anchors_file=$2; shift 2;;
         *) usage;;
     esac
 done
 [[ $milestone =~ ^M[0-8]$ && -n $source && -n $out ]] || usage
+if [[ $milestone == M1 ]]; then
+    [[ $expected_target =~ ^[0-9a-f]{64}$ && $anchors_file == /* ]] || usage
+    evidence_abs_regular "$anchors_file"
+else
+    [[ -z $expected_target$anchors_file ]] || usage
+fi
 evidence_abs_dir "$source"
 mkdir -p -m 700 -- "$MILESTONE_EVIDENCE_ROOT" "$MILESTONE_HANDOFF_ROOT"
 evidence_abs_dir "$MILESTONE_EVIDENCE_ROOT"
@@ -125,7 +133,7 @@ case $milestone in
 esac
 case $milestone in
     M0) "$project_root/scripts/$verifier" "$semantic/m0" --component-map "$semantic/m0/component-map.tsv" >/dev/null;;
-    M1) "$project_root/scripts/$verifier" "$semantic/session" >/dev/null;;
+    M1) "$project_root/scripts/$verifier" "$semantic/session" "$expected_target" "$anchors_file" >/dev/null;;
     M2|M3|M4|M5|M6|M7) MILESTONE_EVIDENCE_ROOT="$MILESTONE_EVIDENCE_ROOT" "$project_root/scripts/$verifier" --bundle "$semantic/bundle" >/dev/null;;
     M8) "$project_root/scripts/$verifier" --evidence "$semantic/m8/evidence" --anchor "$semantic/m8/anchor.txt" >/dev/null;;
 esac
@@ -158,7 +166,12 @@ done < <(find -P "$publish/source" -type f -print0 | sort -z)
     printf 'source_inventory_sha256=%s\nsource_inventory_records=%s\nverifier=%s\n' "$(evidence_sha256 "$inventory")" "$(( $(wc -l < "$inventory") - 1 ))" "$verifier"
 } > "$publish/manifest.txt")
 evidence_write_sums "$publish" "$publish/SHA256SUMS"
-"$project_root/scripts/verify-milestone-handoff.sh" --bundle "$publish" >/dev/null
+if [[ $milestone == M1 ]]; then
+    "$project_root/scripts/verify-milestone-handoff.sh" --bundle "$publish" \
+        --expected-target-identity-sha256 "$expected_target" --target-readiness-anchors "$anchors_file" >/dev/null
+else
+    "$project_root/scripts/verify-milestone-handoff.sh" --bundle "$publish" >/dev/null
+fi
 mv -- "$publish" "$out"
 publish=
 printf 'handoff=%s milestone=%s evidence_valid=true hardware_acceptance=false\n' "$out" "$milestone"

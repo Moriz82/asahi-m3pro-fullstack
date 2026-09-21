@@ -11,17 +11,13 @@ parent=$(dirname -- "$report")
 hash=$(evidence_sha256 "$input")
 matches=$(mktemp "${TMPDIR:-/tmp}/kernel-log-matches.XXXXXX")
 trap 'rm -f -- "$matches"' EXIT
-grep -Ein \
-    -e 'panic' \
-    -e '(^|[^[:alnum:]_])(BUG|Oops|WARNING)([^[:alnum:]_]|$)' \
-    -e 'KASAN|KCSAN|UBSAN' \
-    -e 'lockdep' \
-    -e 'DART[^[:cntrl:]]*fault' \
-    -e 'IOMMU[^[:cntrl:]]*fault' \
-    -e '(^|[^[:alnum:]_])SError([^[:alnum:]_]|$)' \
-    -e 'unhandled[[:space:]]+fault' "$input" >"$matches" || true
-status=clean
-[[ ! -s $matches ]] || status=blocked
+result=0
+evidence_fault_log_matches "$input" >"$matches" || result=$?
+case $result in
+    0) status=blocked ;;
+    1) status=clean ;;
+    *) printf 'Kernel-log scan failed; no report published.\n' >&2; exit 1 ;;
+esac
 (umask 077; {
     printf 'input_sha256=%s\n' "$hash"
     printf 'status=%s\n' "$status"

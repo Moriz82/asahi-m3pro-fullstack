@@ -10,7 +10,9 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
  && apt-get install --no-install-recommends -y \
       bash=5.2.15-2+b13 \
       binutils=2.40-2 \
+      busybox-static=1:1.35.0-4+deb12u1+b1 \
       cpio=2.13+dfsg-7.1 \
+      device-tree-compiler=1.6.1-4+b1 \
       file=1:5.44-3 \
       git=1:2.39.5-0+deb12u3 \
       gawk=1:5.2.1-2 \

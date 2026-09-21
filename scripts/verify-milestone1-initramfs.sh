@@ -69,7 +69,11 @@ for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         path = os.path.join(current, name)
         rel = os.path.relpath(path, root).replace(os.sep, '/')
         if rel != 'SHA256SUMS':
-            actual[rel] = hashlib.sha256(open(path, 'rb').read()).hexdigest()
+            digest = hashlib.sha256()
+            with open(path, 'rb') as member:
+                for chunk in iter(lambda: member.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            actual[rel] = digest.hexdigest()
 if set(listed) != set(actual):
     raise SystemExit('checksum manifest has missing or extra files')
 for rel, expected in listed.items():
@@ -112,6 +116,10 @@ for required in "$M1_INITRAMFS_NAME" init bin/busybox initramfs.inventory file.t
     test -s "$evidence/$required" || { printf 'Missing initramfs evidence: %s\n' "$evidence/$required" >&2; exit 1; }
 done
 verify_checksum_manifest "$evidence" "$evidence/SHA256SUMS"
+cmp -s "$evidence/init" "$project_root/initramfs/milestone1/init" || {
+    printf 'Embedded M1 init differs from the reviewed source; rebuild the initramfs.\n' >&2
+    exit 1
+}
 grep -Fx 'component=milestone1-initramfs' "$evidence/manifest.txt" >/dev/null
 grep -Fx 'compression=none' "$evidence/manifest.txt" >/dev/null
 grep -Fx 'storage_policy=ram-only' "$evidence/manifest.txt" >/dev/null
@@ -129,6 +137,14 @@ readonly m0_run_dir="$(cd "$linux_root" && pwd -P)"
 readonly m0_run_id="$(basename "$m0_run_dir")"
 grep -Fx "m0_run_id=${m0_run_id}" "$evidence/manifest.txt" >/dev/null
 grep -Fx "m0_manifest_sha256=$(shasum -a 256 "$linux_root/manifest.txt" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
+source_epoch=$(awk -F= '$1 == "source_date_epoch" {print $2}' "$linux_root/manifest.txt")
+[[ $source_epoch =~ ^(0|[1-9][0-9]{0,9})$ ]] && ((source_epoch <= 4294967295)) || {
+    printf 'Invalid M0 source epoch for newc metadata\n' >&2; exit 1;
+}
+[[ $(awk -F= '$1 == "source_date_epoch" {print $2}' "$evidence/manifest.txt") == "$source_epoch" ]] || {
+    printf 'Initramfs source epoch differs from M0\n' >&2; exit 1;
+}
+readonly source_epoch
 grep -Fx "image_sha256=$(shasum -a 256 "$linux_root/Image" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
 grep -Fx "dtb_sha256=$(shasum -a 256 "$linux_root/dtbs/apple/t6030-j514s.dtb" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
 grep -Fx init "$evidence/initramfs.inventory" >/dev/null
@@ -138,14 +154,29 @@ if grep -Eq 'mount[[:space:]]+-t[[:space:]]+(ext[234]|apfs|hfs|xfs|btrfs)' "$evi
 validate_busybox "$evidence/bin/busybox"
 test "$(shasum -a 256 "$evidence/bin/busybox" | awk '{print $1}')" = "$M1_BUSYBOX_SHA256"
 if elf_program_headers "$evidence/bin/busybox" 2>/dev/null | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)'; then exit 1; fi
-gzip -t "$evidence/$M1_INITRAMFS_NAME"
 archive_inventory() {
-    python3 - "$evidence/$M1_INITRAMFS_NAME" <<'PY'
-import gzip, sys
+    python3 - "$evidence/$M1_INITRAMFS_NAME" "$project_root/initramfs/milestone1/init" "$evidence/bin/busybox" "$source_epoch" <<'PY'
+import io, os, sys, zlib
 
-path = sys.argv[1]
+path, init_path, busybox_path, epoch = sys.argv[1:]
+epoch = int(epoch)
+member_limit = max(os.path.getsize(init_path), os.path.getsize(busybox_path), 64)
+# Two files, five directories, eleven applet links. Bound compressed and
+# decompressed bytes before parsing, including deliberately oversized headers.
+entry_limit = 20
+output_limit = os.path.getsize(init_path) + os.path.getsize(busybox_path) + entry_limit * (110 + 256 + 64 + 8) + 512
+with open(path, 'rb') as packed:
+    compressed = packed.read(2 * output_limit + 1)
+if len(compressed) > 2 * output_limit:
+    raise SystemExit('compressed initramfs exceeds bounded payload size')
+decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+raw = decoder.decompress(compressed, output_limit + 1)
+if len(raw) > output_limit or decoder.unconsumed_tail:
+    raise SystemExit('decompressed initramfs exceeds bounded payload size')
+if not decoder.eof or decoder.unused_data:
+    raise SystemExit('initramfs must contain exactly one complete gzip member')
 seen = set()
-with gzip.open(path, 'rb') as stream:
+with io.BytesIO(raw) as stream:
     def take(length):
         data = stream.read(length)
         if len(data) != length:
@@ -157,8 +188,10 @@ with gzip.open(path, 'rb') as stream:
             raise SystemExit('invalid newc header')
         size = int(header[54:62], 16)
         namesize = int(header[94:102], 16)
+        if not 1 <= namesize <= 256 or size > member_limit:
+            raise SystemExit('newc member exceeds bounded payload size')
         name_bytes = take(namesize)
-        if not name_bytes.endswith(b'\0'):
+        if not name_bytes.endswith(b'\0') or b'\0' in name_bytes[:-1]:
             raise SystemExit('invalid newc name')
         name = name_bytes[:-1].decode('utf-8')
         take((-((110 + namesize) % 4)) % 4)
@@ -166,20 +199,35 @@ with gzip.open(path, 'rb') as stream:
         data = take(size)
         take((-(size % 4)) % 4)
         normalized = name[2:] if name.startswith('./') else name
-        if not normalized or normalized.startswith('/') or '..' in normalized.split('/'):
+        if not normalized or normalized.startswith('/') or '..' in normalized.split('/') or any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
             raise SystemExit('unsafe newc path')
         if normalized != 'TRAILER!!!':
             if normalized in seen:
                 raise SystemExit('duplicate newc member')
+            if len(seen) >= entry_limit:
+                raise SystemExit('too many newc members')
             seen.add(normalized)
             kind = mode & 0o170000
+            uid, gid, nlink, mtime = (int(header[start:start + 8], 16) for start in (22, 30, 38, 46))
+            if uid != 0 or gid != 0 or mtime != epoch:
+                raise SystemExit('non-canonical newc ownership or timestamp')
+            if kind in (0o100000, 0o120000) and nlink != 1:
+                raise SystemExit('hardlinked newc payload is not allowed')
             if kind == 0o100000:
+                if mode != 0o100755:
+                    raise SystemExit('newc executable mode must be 0755')
                 member_type = 'file'
                 payload = '-'
             elif kind == 0o040000:
+                if mode != 0o040755 or size != 0 or nlink != 2:
+                    raise SystemExit('invalid newc directory metadata')
                 member_type = 'dir'
                 payload = '-'
             elif kind == 0o120000:
+                if mode != 0o120777:
+                    raise SystemExit('newc symlink mode must be 0777')
+                if data != b'busybox':
+                    raise SystemExit('newc applet symlink must target busybox exactly')
                 member_type = 'symlink'
                 try:
                     payload = data.decode('utf-8')
@@ -189,6 +237,13 @@ with gzip.open(path, 'rb') as stream:
                 raise SystemExit('unsupported newc member type')
             print(normalized + '\t' + member_type + '\t' + payload)
         else:
+            if name != 'TRAILER!!!' or size != 0:
+                raise SystemExit('invalid newc trailer')
+            # The producer emits one archive in 512-byte CPIO blocks. Linux
+            # can unpack concatenated archives; do not silently ignore one.
+            padding_size = (-stream.tell()) % 512
+            if take(padding_size) != b'\0' * padding_size or stream.read(1):
+                raise SystemExit('unexpected data after newc trailer')
             break
 PY
 }
@@ -234,7 +289,7 @@ if not found:
 PY
 }
 archive_inventory_output="$(archive_inventory)"
-readonly expected_applets='cat date dmesg grep mkdir mount sh sleep tee touch uname'
+readonly expected_applets='cat date dmesg grep head mkdir mount sh sleep tee timeout touch uname'
 expected_archive_inventory="$(
     printf '%s\n' \
         $'bin\tdir\t-' \
@@ -261,6 +316,10 @@ cmp "$evidence/bin/busybox" "$archive_tmp/busybox"
 grep -Fx "init_sha256=$(shasum -a 256 "$evidence/init" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
 grep -Fx "busybox_sha256=$(shasum -a 256 "$evidence/bin/busybox" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
 grep -Fx "archive_init_sha256=$(shasum -a 256 "$archive_tmp/init" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
+cmp -s "$archive_tmp/init" "$project_root/initramfs/milestone1/init" || {
+    printf 'Embedded M1 init differs from the reviewed source; rebuild the initramfs.\n' >&2
+    exit 1
+}
 grep -Fx "archive_busybox_sha256=$(shasum -a 256 "$archive_tmp/busybox" | awk '{print $1}')" "$evidence/manifest.txt" >/dev/null
 validate_busybox "$archive_tmp/busybox"
 printf 'milestone1.initramfs=verified\n'

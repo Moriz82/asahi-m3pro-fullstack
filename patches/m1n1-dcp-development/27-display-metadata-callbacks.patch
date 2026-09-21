@@ -1,0 +1,100 @@
+Subject: [PATCH 27] proxyclient: preserve 23J220 display callback metadata
+
+Development-only against 60e53e7078c5cb7efce32d64bf50829e9401e44f and the preceding
+selected development patches. Exact firmware/host D006 is 60/56 bytes;
+D576 is 88/76 bytes. Preserve values/opaque metadata in in/out replies,
+acknowledge frame property flags, and validate target sizes before dispatch.
+Metadata receipt only: brightness policy and multi-pipe tiling remain absent.
+Older layouts are retained. No boot-builder or hardware enablement change.
+
+diff --git a/proxyclient/m1n1/fw/dcp/ipc.py b/proxyclient/m1n1/fw/dcp/ipc.py
+index dfa3f2d..e39932b 100644
+--- a/proxyclient/m1n1/fw/dcp/ipc.py
++++ b/proxyclient/m1n1/fw/dcp/ipc.py
+@@ -407,9 +407,16 @@ rt_bw_config_t = Struct(
+     Ver("V == V14_7", "padding2" / UnkBytes(8)),
+ )
+ 
+-frame_sync_props_t = Struct(
+-    "unk1" / UnkBytes(28),
+-)
++if Ver.check("V == V14_7"):
++    frame_sync_props_t = Struct(
++        "values" / Default(Array(11, uint32_t), [0] * 11),
++        "updated" / Default(Bytes(11), bytes(11)),
++        "reserved" / Default(Bytes(1), bytes(1)),
++    )
++else:
++    frame_sync_props_t = Struct(
++        "unk1" / UnkBytes(28),
++    )
+ 
+ IOUserClient = Struct(
+     "addr" / Hex(Int64ul),
+@@ -902,7 +909,10 @@ class IOMobileFramebufferAP(IPCObject):
+             A470 = update_dfb
+ 
+     # FW version dependent callbacks
+-    if Ver.check("V < V13_5"):
++    if Ver.check("V == V14_7"):
++        # 23J220: 64-bit connection, 75-byte in/out record, boolean.
++        hotPlug_notify_gated = Callback(void, "hotPlug_notify_gated", ulong, InOutPtr(Default(Bytes(75), bytes(75))), bool_)
++    elif Ver.check("V < V13_5"):
+         hotPlug_notify_gated = Callback(void, "hotPlug_notify_gated", ulong)
+     else:
+         # TODO: is this sensible?
+diff --git a/proxyclient/m1n1/fw/dcp/manager.py b/proxyclient/m1n1/fw/dcp/manager.py
+index 8b7e578..f83c4a6 100644
+--- a/proxyclient/m1n1/fw/dcp/manager.py
++++ b/proxyclient/m1n1/fw/dcp/manager.py
+@@ -44,6 +44,12 @@ class DCPBaseManager:
+                  len(state.in_data) != state.in_len or state.out_len != 0)):
+             raise ValueError("Invalid swap completion callback size")
+ 
++        if (state.tag in {"D006", "D576"} and ipc.Ver.check("V == V14_7") and
++                (state.in_len != method.in_struct.sizeof() or
++                 len(state.in_data) != state.in_len or
++                 state.out_len != method.out_struct.sizeof())):
++            raise ValueError("Invalid display metadata callback size")
++
+         self.in_callback += 1
+         try:
+             retval = method.callback(func, state.in_data)
+@@ -138,6 +144,23 @@ class DCPManager(DCPBaseManager):
+ 
+     ## UPPipeAP_H13P methods
+ 
++    def set_frame_sync_props(self, props):
++        if not ipc.Ver.check("V == V14_7"):
++            raise NotImplementedError("Frame-sync properties require the verified V14_7 layout")
++        if props is None:
++            return
++        names = (
++            "IOMFBTestBacklightDimValue", "IOMFBBrightnessLevel", "APTPDCBrightness",
++            "Brightness_Scale", "BLNitsCap", "RTPLCBLNitsScaler", "twilightStrength",
++            "ammoliteStrength", "IOMFBIndicatorBrightnessNits",
++            "IOMFBSecureContentFactor", "IOMFBSecureIndicatorFactor",
++        )
++        # Mirror metadata only; no macOS brightness notification or device I/O.
++        for i, name in enumerate(names):
++            if props.val["updated"][i]:
++                self.setProperty(name, props.val["values"][i])
++        props.val["updated"] = bytes(11)
++
+     def did_boot_signal(self):
+         return True
+ 
+@@ -294,8 +317,11 @@ class DCPManager(DCPBaseManager):
+         print(f"powerUpDART({unk})")
+         return 0
+ 
+-    def hotPlug_notify_gated(self, unk):
+-        print(f"hotPlug_notify_gated({unk})")
++    def hotPlug_notify_gated(self, unk, *metadata):
++        if metadata and (not ipc.Ver.check("V == V14_7") or len(metadata) != 2):
++            raise TypeError("Hotplug metadata requires the verified V14_7 signature")
++        # Leave the opaque in/out record intact; tiling policy is not modeled.
++        print(f"hotPlug_notify_gated({unk}, ..., {metadata[1] if metadata else None})")
+ 
+     def is_waking_from_hibernate(self):
+         return False

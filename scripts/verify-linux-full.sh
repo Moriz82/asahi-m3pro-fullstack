@@ -3,8 +3,21 @@ set -Eeuo pipefail
 
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
+LINUX_COMPONENT=linux-full
+development_framebuffer=0
+[[ "$#" -le 2 ]] || exit 1
+case "${2:-}" in
+    '') [[ "$#" -le 1 ]] || exit 1 ;;
+    --development-framebuffer) development_framebuffer=1 ;;
+    *) printf 'Usage: %s [evidence [--development-framebuffer]]\n' "$0" >&2; exit 1 ;;
+esac
 source "${project_root}/scripts/lib/milestone0-output-root.sh"
+source "${project_root}/scripts/lib/milestone0-inspection.sh"
 m0_validate_output_root "$project_root"
+if [[ "$development_framebuffer" = 1 ]]; then
+    source "${project_root}/scripts/lib/linux-development-profile.sh"
+    linux_development_framebuffer_init "$project_root"
+fi
 readonly evidence="${1:-${MILESTONE0_OUTPUT_ROOT}/milestone0/linux-full/latest}"
 test -d "$evidence"
 for required in SHA256SUMS Image System.map vmlinux config config-input config-fragment config-assertions.txt defconfig.config defconfig.diff config-merged.sha256 asahi.config checks.txt dt-binding-check.log dtbs-check.log target-dtbs-check.raw.log target-dtbs-check.log build-warning-inventory.txt dt-binding-warning-inventory.txt dtbs-warning-inventory.txt target-warning-inventory.txt schema-exceptions.txt dtbs-list.inventory dtbs.inventory dtbs-install.inventory modules.inventory headers.inventory headers.tar symlinks.inventory symlink-targets.txt dtbs dtbs-install modules file.txt kernelrelease listnewconfig.log manifest.txt packages.txt rustavailable.log source-status.txt; do
@@ -17,7 +30,22 @@ test -f "$evidence/headers.tar" && test ! -L "$evidence/headers.tar"
     sha256sum -c SHA256SUMS
 )
 grep -Fx "target=Mac15,6/J514s/T6030" "$evidence/manifest.txt" >/dev/null
-grep -Fx "component=linux-full" "$evidence/manifest.txt" >/dev/null
+grep -Fx "component=${LINUX_COMPONENT}" "$evidence/manifest.txt" >/dev/null
+test "$(grep -c '^component=' "$evidence/manifest.txt")" -eq 1
+if [[ "$development_framebuffer" = 1 ]]; then
+    evidence_real="$(cd "$evidence" && pwd -P)"
+    test "${evidence_real%/*}" = "${MILESTONE0_OUTPUT_ROOT}/milestone0/${LINUX_COMPONENT}"
+    for setting in development_profile=framebuffer-v1 canonical_m0=false hardware_acceptance=false boot_authorized=false \
+        "development_fragment_sha256=$LINUX_DEVELOPMENT_FRAGMENT_SHA256"; do
+        grep -Fx "$setting" "$evidence/manifest.txt" >/dev/null
+        test "$(grep -c "^${setting%%=*}=" "$evidence/manifest.txt")" -eq 1
+    done
+    cmp "$evidence/development-fragment" "$project_root/config/linux-development-framebuffer.config"
+    linux_development_framebuffer_config "$evidence/config" "$evidence/development-fragment" | cmp - "$evidence/development-config-assertions.txt"
+else
+    if grep -Eq '^(development_profile|development_fragment_sha256|canonical_m0)=' "$evidence/manifest.txt"; then exit 1; fi
+    test ! -e "$evidence/development-fragment" && test ! -e "$evidence/development-config-assertions.txt"
+fi
 grep -Fx "source_url=${LINUX_URL}" "$evidence/manifest.txt" >/dev/null
 grep -Fx "source_commit=${LINUX_COMMIT}" "$evidence/manifest.txt" >/dev/null
 grep -Fx "source_tree_commit=${LINUX_SOURCE_TREE_COMMIT}" "$evidence/manifest.txt" >/dev/null
@@ -110,10 +138,10 @@ for setting in \
     CONFIG_PM_SLEEP=y CONFIG_HWMON=y CONFIG_THERMAL=y CONFIG_THERMAL_HWMON=y \
     CONFIG_TYPEC_SN201202X=m CONFIG_TYPEC_TBT_ALTMODE=m CONFIG_USB4=m \
     CONFIG_USB_UAS=m CONFIG_HOTPLUG_PCI_PCIE=y CONFIG_MMC_SDHCI_PCI=m \
-    'CONFIG_LOCALVERSION=".asahi1"' '# CONFIG_LOCALVERSION_AUTO is not set'; do
+    "CONFIG_LOCALVERSION=\"$LINUX_LOCALVERSION\"" '# CONFIG_LOCALVERSION_AUTO is not set'; do
     grep -Fx "$setting" "$evidence/config" >/dev/null
 done
-! grep -q '^CONFIG_' "$evidence/listnewconfig.log"
+if grep -q '^CONFIG_' "$evidence/listnewconfig.log"; then exit 1; fi
 grep -Fx 'CONFIG_ARM64=y' "$evidence/config-assertions.txt" >/dev/null
 grep -Fx 'CONFIG_ARCH_APPLE=y' "$evidence/config-assertions.txt" >/dev/null
 grep -Fx 'CONFIG_DRM_ASAHI=m' "$evidence/config-assertions.txt" >/dev/null
@@ -134,7 +162,7 @@ extract_target_log() {
         capture { print }
         END { if (!seen || !terminated) exit 1 }
     ' "$evidence/target-dtbs-check.raw.log" \
-        | sed -E 's#/workspace/src/linux/##g; s#/workspace/build/linux-full/##g'
+        | sed -E "s#/workspace/src/linux/##g; s#/workspace/build/${LINUX_COMPONENT}/##g"
 }
 cmp <(extract_target_log) "$evidence/target-dtbs-check.log"
 test "$(wc -l < "$evidence/target-dtbs-check.log" | tr -d ' ')" -eq "$LINUX_TARGET_DT_DIAGNOSTICS_LINES"
@@ -190,10 +218,8 @@ grep -Eq 'Image:.*(ARM|aarch64|64-bit)' "$evidence/file.txt"
 grep -Eq 't6030-j514s\.dtb: Device Tree Blob version 17' "$evidence/file.txt"
 command -v docker >/dev/null
 docker info >/dev/null
-docker image inspect "$container_image_id" >/dev/null
 readonly evidence_abs="$(cd "$evidence" && pwd -P)"
-docker run --rm --mount "type=bind,src=${evidence_abs},dst=/evidence,readonly" \
-    "$container_image_id" bash -Eeuo pipefail -c '
+m0_inspection_run "$evidence_abs" '' "$container_image_id" '
         readonly archive=/evidence/headers.tar
         readonly inventory=/evidence/headers.inventory
         readonly extract_root="$(mktemp -d /tmp/m0-headers.XXXXXX)"
@@ -227,4 +253,4 @@ docker run --rm --mount "type=bind,src=${evidence_abs},dst=/evidence,readonly" \
         test -z "$(find -P "$extract_root" ! -type f ! -type d -print -quit)"
         (cd "$extract_root"; find usr/include -type f -printf "%P\\n" | sed "s#^#usr/include/#" | LC_ALL=C sort) | cmp - "$inventory"
     '
-printf 'linux-full.baseline=verified\n'
+printf '%s.baseline=verified\n' "$LINUX_COMPONENT"

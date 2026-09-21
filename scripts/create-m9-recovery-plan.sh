@@ -6,9 +6,11 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 M9_PROJECT_ROOT=$project_root
 source "$project_root/scripts/lib/m9-canonical.sh"
+m9_require_m1_anchor_args "$@"
+shift 4
 output_root=${SOFTWARE_OUTPUT_ROOT:-$project_root/out}
 denylist="$project_root/config/milestone9-action-denylist.txt"
-usage() { printf 'usage: %s --release-inputs ABS --release-anchor ABS --authority TEXT --operator TEXT --out ABS\n' "$0" >&2; exit 64; }
+usage() { printf 'usage: %s --expected-target-identity-sha256 HEX --target-readiness-anchors ABS --release-inputs ABS --release-anchor ABS --authority TEXT --operator TEXT --out ABS\n' "$0" >&2; exit 64; }
 [[ $# -eq 10 && $1 == --release-inputs && $3 == --release-anchor && $5 == --authority && $7 == --operator && $9 == --out ]] || usage
 release=$2; release_anchor=$4; authority=$6; operator=$8; out=${10}
 evidence_abs_dir "$release"; evidence_abs_regular "$release/manifest.txt"; evidence_abs_regular "$release_anchor"; evidence_abs_regular "$denylist"
@@ -28,7 +30,7 @@ evidence_readonly "$release_anchor"
 [[ $(evidence_kv "$release/manifest.txt" release_gate) == blocked ]] || evidence_die 'release gate is not blocked'
 [[ $(evidence_kv "$release/manifest.txt" hardware_acceptance) == false ]] || evidence_die 'hardware acceptance must remain false'
 [[ $(evidence_kv "$release/manifest.txt" external_anchor_sha256) == "$(evidence_sha256 "$release_anchor")" ]] || evidence_die 'release anchor changed or is not externally pinned'
-m9_validate_canonical_release_binding "$release" "$release_anchor"
+m9_validate_canonical_release_binding "$release" "$release_anchor" "$M9_EXPECTED_TARGET" "$M9_TARGET_ANCHORS"
 if printf '%s\n%s\n' "$authority" "$operator" | grep -Eiq 'password|secret|token|private[[:space:]]+key|-----BEGIN'; then evidence_die 'secrets are not accepted in recovery metadata'; fi
 stage=$(mktemp -d "$out_parent/.m9-recovery-plan.XXXXXX")
 chmod 700 "$stage"

@@ -5,6 +5,8 @@ set -Eeuo pipefail
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
 source "${project_root}/config/milestone1.env"
+source "${project_root}/scripts/lib/evidence.sh"
+source "${project_root}/scripts/lib/milestone1-evidence.sh"
 readonly m0_root="${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0"
 
 manifest_value() {
@@ -19,11 +21,12 @@ if [[ "${1:-}" == --self-test ]]; then
     printf 'assemble-milestone1-session self-test passed\n'
     exit 0
 fi
-[[ $# -eq 2 ]] || { printf 'Usage: %s SESSIONS_ROOT SESSION_OUTPUT\n' "$0" >&2; exit 64; }
+[[ $# -eq 4 ]] || { printf 'Usage: %s SESSIONS_ROOT SESSION_OUTPUT EXPECTED_TARGET_ID_SHA256 INDEPENDENT_ANCHORS_FILE\n' "$0" >&2; exit 64; }
 readonly source_root="$1"
 readonly output_root="$2"
+readonly expected_target="$3" anchors_file="$4"
 test -d "$source_root" && test ! -L "$source_root"
-test ! -e "$output_root" || { printf 'Refusing to overwrite existing session: %s\n' "$output_root" >&2; exit 2; }
+[[ ! -e "$output_root" && ! -L "$output_root" ]] || { printf 'Refusing to overwrite existing session: %s\n' "$output_root" >&2; exit 2; }
 readonly source_real="$(cd "$source_root" && pwd -P)"
 readonly m0_run_dir="$(cd "${m0_root}/linux-full/latest" && pwd -P)"
 readonly m0_run_id="$(basename "$m0_run_dir")"
@@ -49,7 +52,7 @@ readonly first_execution="${children[0]}/execution"
 test -d "$first_execution" && test ! -L "$first_execution"
 readonly first_manifest="${first_execution}/manifest.txt"
 baseline_value() { manifest_value "$1" "$first_manifest"; }
-for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command; do
+for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command target_identity_sha256 controller_identity_sha256 m1n1_tool_sha256; do
     test -n "$(baseline_value "$key")"
 done
 [[ "$(baseline_value source_commit)" == "$M1N1_COMMIT" && "$(baseline_value m0_run_id)" == "$m0_run_id" ]]
@@ -58,15 +61,20 @@ done
 
 readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N8 -tx1 /dev/urandom | tr -d "[:space:]")"
 readonly stage="${output_root%/}.tmp.${run_id}"
-trap 'rm -rf "$stage"' EXIT
 if [[ -e "$stage" || -L "$stage" ]]; then
     printf 'Refusing colliding Milestone 1 assembly stage.\n' >&2
     exit 1
 fi
 mkdir "$stage"
+trap 'rm -rf "$stage"' EXIT
+seen_execution_ids='|'
 for index in "${!children[@]}"; do
     child="${children[$index]}"
     execution="$child/execution"
+    m1_provenance run-verify "$child" "$expected_target" "$anchors_file"
+    execution_id="$(manifest_value execution_id "$execution/manifest.txt")"
+    [[ "$seen_execution_ids" != *"|$execution_id|"* ]] || { printf 'Duplicate execution ID.\n' >&2; exit 1; }
+    seen_execution_ids="${seen_execution_ids}${execution_id}|"
     test -d "$execution" && test ! -L "$execution"
     for required in manifest.txt SHA256SUMS host.log serial.log; do
         test -f "$execution/$required" && test ! -L "$execution/$required" && test -s "$execution/$required"
@@ -84,7 +92,7 @@ for index in "${!children[@]}"; do
     grep -Fx 'status=completed' "$child/manifest.txt" >/dev/null
     grep -Fx "execution_sha256=$execution_manifest_sha256" "$child/manifest.txt" >/dev/null
     grep -Fx $'1\tsuccess\texecution\tserial.log' "$child/records.tsv" >/dev/null
-    for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command; do
+    for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command target_identity_sha256 controller_identity_sha256 m1n1_tool_sha256; do
         grep -Fx "$key=$(baseline_value "$key")" "$child/manifest.txt" >/dev/null
     done
     (cd "$execution" && shasum -a 256 -c SHA256SUMS)
@@ -94,13 +102,14 @@ for index in "${!children[@]}"; do
     for line in 'status=completed' 'producer_exit=0' 'tee_exit=0' 'pipe_status=0,0' 'storage_policy=ram-only'; do
         grep -Fx "$line" "$execution/manifest.txt" >/dev/null
     done
-    for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command; do
+    for key in source_commit m0_run_id m0_manifest_sha256 image_sha256 dtb_sha256 initramfs_sha256 tool device command target_identity_sha256 controller_identity_sha256 m1n1_tool_sha256; do
         grep -Fx "$key=$(baseline_value "$key")" "$execution/manifest.txt" >/dev/null
     done
     install -d "$stage/run-$((index + 1))"
     for required in manifest.txt SHA256SUMS host.log serial.log; do
         install -m 0644 "$execution/$required" "$stage/run-$((index + 1))/$required"
     done
+    cp -R "$execution/preflight" "$stage/run-$((index + 1))/preflight"
     printf '%s\tsuccess\trun-%s\tserial.log\n' "$((index + 1))" "$((index + 1))" >>"$stage/records.tsv"
 done
 for required in watchdog panic reboot macos-return dfu; do
@@ -110,13 +119,16 @@ for required in watchdog panic reboot macos-return dfu; do
     grep -Fx 'source=serial-log' "$stage/evidence-${required}.txt" >/dev/null
 done
 {
-    printf 'format=1\nstatus=complete\nstorage_policy=ram-only\nevidence_policy=checksummed-execution-and-serial\n'
+    printf 'format=2\nstatus=complete\nstorage_policy=ram-only\nevidence_policy=checksummed-execution-and-serial\n'
     printf 'source_commit=%s\nm0_run_id=%s\nm0_manifest_sha256=%s\nimage_sha256=%s\ndtb_sha256=%s\n' "$M1N1_COMMIT" "$m0_run_id" "$m0_manifest_sha256" "$image_sha256" "$dtb_sha256"
     printf 'initramfs_sha256=%s\ntool=%s\ndevice=%s\ncommand=%s\n' "$(baseline_value initramfs_sha256)" "$(baseline_value tool)" "$(baseline_value device)" "$(baseline_value command)"
+    printf 'target_identity_sha256=%s\ncontroller_identity_sha256=%s\nm1n1_tool_sha256=%s\n' \
+        "$(baseline_value target_identity_sha256)" "$(baseline_value controller_identity_sha256)" "$(baseline_value m1n1_tool_sha256)"
+    printf 'target_readiness_max_age_seconds=%s\npreflight_max_age_seconds=%s\n' "$M1_TARGET_READINESS_MAX_AGE_SECONDS" "$M1_PREFLIGHT_MAX_AGE_SECONDS"
 } >"$stage/manifest.txt"
-(cd "$stage" && shasum -a 256 records.tsv manifest.txt evidence-*.txt >SHA256SUMS)
+m1_checksum_tree "$stage"
 mkdir -p "$(dirname "$output_root")"
-mv "$stage" "$output_root"
+"${project_root}/scripts/verify-milestone1-session.sh" "$stage" "$expected_target" "$anchors_file"
+evidence_atomic_publish_directory "$stage" "$output_root"
 trap - EXIT
-"${project_root}/scripts/verify-milestone1-session.sh" "$output_root"
 printf 'milestone1.session=%s\n' "$output_root"

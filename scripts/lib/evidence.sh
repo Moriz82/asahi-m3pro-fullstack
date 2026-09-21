@@ -26,9 +26,9 @@ evidence_sha256_stream() {
 
 evidence_abs_regular() {
     local path=${1:-}
-    [[ $path == /* ]] || evidence_die "path is not absolute: $path"
-    [[ ! -L $path ]] || evidence_die "symlink is not allowed: $path"
-    [[ -f $path ]] || evidence_die "regular file required: $path"
+    [[ $path == /* ]] || { evidence_die "path is not absolute: $path"; return 1; }
+    [[ ! -L $path ]] || { evidence_die "symlink is not allowed: $path"; return 1; }
+    [[ -f $path ]] || { evidence_die "regular file required: $path"; return 1; }
 }
 
 evidence_abs_dir() {
@@ -108,9 +108,8 @@ evidence_new_file() {
 }
 
 evidence_atomic_publish_directory() {
-    local source=$1 destination=$2
     command -v python3 >/dev/null 2>&1 || evidence_die 'python3 is required for atomic output publication'
-    python3 - "$source" "$destination" <<'PY'
+    python3 - "$1" "$2" <<'PY'
 import ctypes
 import os
 import platform
@@ -399,10 +398,12 @@ evidence_validate_m4() {
     [[ $reset =~ ^(planned|not-run|blocked)$ && $recovery =~ ^(planned|not-run|blocked)$ ]] || evidence_die 'invalid software-plan reset/recovery records'
 }
 
-evidence_scan_fault_log() {
+evidence_fault_log_matches() {
     local file=$1
-    evidence_abs_regular "$file"
-    if grep -Eiq \
+    evidence_abs_regular "$file" || return 2
+    # grep status contract: 0 = matches, 1 = no matches, >=2 = scan failure.
+    # Keep report generation and all milestone validators on one signature set.
+    LC_ALL=C grep -Ein \
         -e 'panic' \
         -e '(^|[^[:alnum:]_])(BUG|Oops|WARNING)([^[:alnum:]_]|$)' \
         -e 'KASAN|KCSAN|UBSAN' \
@@ -410,12 +411,22 @@ evidence_scan_fault_log() {
         -e 'DART[^[:cntrl:]]*fault' \
         -e 'IOMMU[^[:cntrl:]]*fault' \
         -e '(^|[^[:alnum:]_])SError([^[:alnum:]_]|$)' \
-        -e 'unhandled[[:space:]]+fault' "$file"; then
-        return 1
-    fi
+        -e 'unhandled[[:space:]]+fault' \
+        -e 'PS[[:space:]][^[:cntrl:]]*:[[:space:]]+(Failed to set reset/disable bits|Failed to reach power state|powering off with RESET active|asserting RESET while powered down|RESET was deasserted while powered down)' \
+        -e 'busy bit did not clear after command' -- "$file"
 }
 
-evidence_require_clean_log() { evidence_scan_fault_log "$1" || evidence_die "fault or warning found in log: $1"; }
+evidence_scan_fault_log() {
+    local result=0
+    evidence_fault_log_matches "$1" >/dev/null || result=$?
+    case $result in
+        1) return 0 ;;
+        0) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+evidence_require_clean_log() { evidence_scan_fault_log "$1" || evidence_die "fault, warning, or scan failure in log: $1"; }
 
 evidence_write_sums() {
     local root=$1 output=$2 file rel

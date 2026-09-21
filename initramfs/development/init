@@ -1,0 +1,223 @@
+#!/bin/sh
+# Fixed-command development collector, not a shell or a hardware acceptance test.
+# Pinned BusyBox ash provides timed single-character reads (unlike dash).
+# shellcheck disable=SC3045
+set -eu
+PATH=/bin:/sbin
+LC_ALL=C
+export PATH LC_ALL
+umask 077
+
+log() { printf 'M3DEV %s\n' "$*"; }
+halt() {
+	log "phase=blocked reason=$1 hardware_acceptance=false" || true
+	while :; do /bin/sleep 1; done
+}
+
+# No devtmpfs, debugfs, efivarfs, disk mounts, udev, or module autoload helper.
+mkdir -p /dev /proc /sys /run
+/bin/mount -t tmpfs -o nosuid,noexec,size=1m tmpfs /dev || halt dev-mount
+/bin/mknod -m 600 /dev/console c 5 1 || halt console-node
+/bin/mknod -m 600 /dev/tty c 5 0 || halt tty-node
+/bin/mknod -m 666 /dev/null c 1 3 || halt null-node
+exec >/dev/console 2>&1
+/bin/mount -t proc -o nosuid,nodev,noexec proc /proc || halt proc-mount
+/bin/mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys || halt sysfs-mount
+/bin/mount -t tmpfs -o nosuid,nodev,noexec,size=16m tmpfs /run || halt run-mount
+mkdir -p /run/m3dev
+
+read -r expected_release </etc/m3dev/kernelrelease || halt missing-kernel-release
+[ "$(/bin/uname -r)" = "$expected_release" ] || halt kernel-release
+read -r expected_cmdline </etc/m3dev/cmdline || halt missing-expected-command-line
+read -r cmdline </proc/cmdline || halt missing-cmdline
+[ "$cmdline" = "$expected_cmdline" ] || halt command-line
+nvme_status=$(tr -d '\000' </sys/firmware/devicetree/base/soc/nvme@38dcc0000/status) || halt nvme-status-unavailable
+[ "$nvme_status" = disabled ] || halt nvme-not-disabled
+# This is defense in depth for the restricted collector, not a hostile-root sandbox.
+storage_guard() {
+	for device in /sys/class/block/*; do
+		[ -e "$device" ] || continue
+		case "${device##*/}" in loop[0-9]*|ram[0-9]*) ;; *) return 1 ;; esac
+	done
+	for device in /sys/class/mtd/*; do [ ! -e "$device" ] || return 1; done
+	for name in /dev/mem /dev/kmem /dev/port /dev/nvme* /dev/sd* /dev/mtd*; do
+		[ ! -e "$name" ] || return 1
+	done
+	[ -r /proc/modules ] || return 1
+	if grep -Eq '^(nvme|nvme_core|nvme_apple|usb_storage|uas|spi_apple) ' /proc/modules; then return 1; else [ "$?" -eq 1 ]; fi
+}
+storage_guard || halt storage-visible
+
+log 'phase=initramfs-start storage_policy=ram-only interface=fixed-commands hardware_acceptance=false'
+log 'scope=no-shell,no-raw-memory,no-block-nodes,no-autoload,no-reboot'
+log "kernel_release=$expected_release"
+
+# Each record has an explicit byte bound, timeout, hash and truncation flag.
+record() {
+	local name source encoding limit status count truncated hash _ignored
+	name=$1 source=$2 encoding=$3 limit=$4
+	if [ ! -r "$source" ]; then log "record name=$name status=unavailable"; return; fi
+	status=0
+	timeout 2 head -c "$((limit + 1))" "$source" >/run/m3dev/read.tmp 2>/run/m3dev/error.tmp || status=$?
+	count=$(wc -c </run/m3dev/read.tmp)
+	truncated=false
+	if [ "$count" -gt "$limit" ]; then truncated=true; count=$limit; fi
+	head -c "$limit" /run/m3dev/read.tmp >/run/m3dev/record.tmp
+	read -r hash _ignored <<EOF
+$(sha256sum /run/m3dev/record.tmp)
+EOF
+	log "record-begin name=$name status=$status bytes=$count sha256=$hash encoding=$encoding truncated=$truncated"
+	if [ "$encoding" = base64 ]; then base64 /run/m3dev/record.tmp; else cat /run/m3dev/record.tmp; fi
+	printf '\n'
+	log "record-end name=$name"
+}
+
+drivers() {
+	local count bus node driver
+	# Finite traversal of cached binding links; no arbitrary user-supplied paths.
+	: >/run/m3dev/drivers.txt
+	count=0
+	for bus in platform i2c spi spmi; do
+		for node in /sys/bus/"$bus"/devices/*; do
+			[ -e "$node" ] || continue
+			count=$((count + 1))
+			if [ "$count" -gt 128 ]; then printf 'inventory-truncated limit=128\n' >>/run/m3dev/drivers.txt; break; fi
+			driver=$(readlink "$node/driver" 2>/dev/null || printf unbound)
+			printf '%s driver=%s\n' "$node" "$driver" >>/run/m3dev/drivers.txt
+		done
+		[ "$count" -le 128 ] || break
+	done
+	record drivers /run/m3dev/drivers.txt text 65536
+}
+
+snapshot() {
+	local name dmesg_status
+	log "snapshot-begin label=$1 uptime=$uptime"
+	for name in version uptime meminfo stat interrupts modules mounts devices iomem fb consoles; do record "$name" "/proc/$name" text 65536; done
+	# fbsysfs show handlers return cached fb_info fields; no modeset or device access.
+	for name in name virtual_size bits_per_pixel stride; do
+		record "fb0-$name" "/sys/class/graphics/fb0/$name" text 256
+	done
+	record cpu-online /sys/devices/system/cpu/online text 65536
+	record cpu-possible /sys/devices/system/cpu/possible text 65536
+	record tainted /proc/sys/kernel/tainted text 32
+	# The producer writes directly to a bounded regular file (ulimit unit: 512 bytes).
+	dmesg_status=0
+	(ulimit -f 129; timeout 3 /bin/dmesg >/run/m3dev/dmesg.tmp 2>/run/m3dev/dmesg-error.tmp) || dmesg_status=$?
+	log "dmesg-producer status=$dmesg_status limit_bytes=66048"
+	record dmesg /run/m3dev/dmesg.tmp text 65536
+	drivers
+	storage_guard || halt storage-visible
+	log "snapshot-end label=$1 hardware_acceptance=false"
+}
+
+probe() {
+	local group module status order attempted
+	group=$1
+	uptime_seconds
+	if [ "$armed" != "$group" ] || [ "$seconds" -gt "$arm_deadline" ]; then
+		armed=none; log "probe-refused reason=requires-current-arm-$group"; return
+	fi
+	armed=none
+	case "$group" in
+		core) order=/etc/m3dev/core.order; attempted=$core_probed; core_probed=true ;;
+		dart) order=/etc/m3dev/dart.order; attempted=$dart_probed; dart_probed=true ;;
+		*) halt invalid-probe-group ;;
+	esac
+	[ "$attempted" = false ] || { log 'probe-refused reason=already-attempted'; return; }
+	storage_guard || halt storage-visible
+	snapshot "before-$group"
+	# Order and exact bytes are host-verified. Input cannot choose modules or arguments.
+	if ! (cd / && sha256sum -c /etc/m3dev/modules.sha256 >/run/m3dev/module-hashes.txt 2>&1); then halt module-hashes; fi
+	while IFS= read -r module; do
+		[ -n "$module" ] || halt empty-module
+		status=0
+		log "module-probe-begin group=$group path=$module"
+		(ulimit -f 129; timeout 5 /bin/insmod "/$module" >/run/m3dev/insmod.txt 2>&1) || status=$?
+		log "module-probe path=$module status=$status"
+		record module-output /run/m3dev/insmod.txt text 65536
+		storage_guard || halt storage-visible
+		if [ "$status" -ne 0 ]; then log 'probe-stopped reason=module-error remaining-not-loaded'; break; fi
+	done <"$order"
+	snapshot "after-$group"
+}
+
+uptime_seconds() {
+	read -r uptime _remainder </proc/uptime || halt uptime
+	seconds=${uptime%%.*}
+	case "$seconds" in ''|*[!0-9]*) halt invalid-uptime ;; esac
+}
+
+armed=none arm_deadline=0 core_probed=false dart_probed=false
+hello() {
+	local nonce init_hash modules_hash notes_hash expected_notes binding_hash _ignored
+	nonce=$1
+	case "$nonce" in ''|*[!0-9a-f]*) log 'command-rejected reason=invalid-nonce'; return ;; esac
+	[ "${#nonce}" -eq 32 ] || { log 'command-rejected reason=invalid-nonce'; return; }
+	storage_guard || halt storage-visible
+	notes_hash=$(sha256sum /sys/kernel/notes) || halt kernel-notes-unavailable
+	notes_hash=${notes_hash%% *}
+	read -r expected_notes </etc/m3dev/kernel-notes.sha256 || halt kernel-notes-expected
+	[ "$notes_hash" = "$expected_notes" ] || halt running-kernel-notes-mismatch
+	read -r binding_hash </etc/m3dev/console-binding || halt console-binding
+	read -r init_hash _ignored <<EOF
+$(sha256sum /init)
+EOF
+	read -r modules_hash _ignored <<EOF
+$(sha256sum /etc/m3dev/modules.sha256)
+EOF
+	log "hello protocol=2 nonce=$nonce init_sha256=$init_hash modules_sha256=$modules_hash kernel_notes_sha256=$notes_hash bundle_sha256=$binding_hash kernel_release=$expected_release"
+}
+dispatch() {
+	case "$1" in probe-core) probe core; return ;; probe-dart) probe dart; return ;; esac
+	# Only the immediately following matching probe can consume a short-lived arm.
+	armed=none
+	case "$1" in
+		hello\ *) hello "${1#hello }" ;;
+		help) log 'commands=help,status,snapshot,fdt,arm-core,probe-core,arm-dart,probe-dart; no shell; probes program hardware' ;;
+		status) log "status uptime=$uptime core_attempted=$core_probed dart_attempted=$dart_probed hardware_acceptance=false" ;;
+		snapshot) snapshot operator ;;
+		fdt) record runtime-fdt /sys/firmware/fdt base64 1048576 ;;
+		arm-core) armed=core; arm_deadline=$((seconds + 10)); log 'core-armed next=probe-core expires_seconds=10 warning=programs-hardware' ;;
+		arm-dart) armed=dart; arm_deadline=$((seconds + 10)); log 'dart-armed next=probe-dart expires_seconds=10 warning=resets-IOMMUs-may-disrupt-USB-debugging' ;;
+		*) log 'command-rejected allowed=fixed-commands-only' ;;
+	esac
+}
+
+uptime_seconds
+started=$seconds next_heartbeat=$seconds sample15=false sample60=false
+record runtime-fdt /sys/firmware/fdt base64 1048576
+record runtime-config /proc/config.gz base64 262144
+snapshot early
+# Console input is untrusted. No eval, shell launch, path interpolation or root prompt.
+/bin/stty -F /dev/console -echo -icanon -ixon -ixoff min 1 time 0 || halt console-mode
+exec 3</dev/console
+line='' discarded=false after_cr=false
+cr=$(printf '\r')
+log 'phase=development-ready hardware_acceptance=false'
+dispatch help
+while :; do
+	uptime_seconds
+	elapsed=$((seconds - started))
+	if [ "$seconds" -ge "$next_heartbeat" ]; then
+		log "heartbeat sequence=$((elapsed / 5)) uptime=$uptime core_attempted=$core_probed dart_attempted=$dart_probed"
+		next_heartbeat=$((seconds + 5))
+	fi
+	if [ "$elapsed" -ge 15 ] && [ "$sample15" = false ]; then sample15=true; snapshot scheduled-15s; fi
+	if [ "$elapsed" -ge 60 ] && [ "$sample60" = false ]; then sample60=true; snapshot scheduled-60s; fi
+	character=''
+	if IFS= read -r -t 1 -n 1 character <&3; then
+		if [ "$after_cr" = true ] && [ -z "$character" ]; then after_cr=false; continue; fi
+		after_cr=false
+		if [ -z "$character" ] || [ "$character" = "$cr" ]; then
+			[ "$character" != "$cr" ] || after_cr=true
+			if [ "$discarded" = false ] && [ -n "$line" ]; then dispatch "$line"; else armed=none; log 'command-rejected reason=empty-or-oversized'; fi
+			line='' discarded=false
+		elif [ "$discarded" = false ]; then
+			if [ "${#line}" -ge 80 ]; then line='' discarded=true; else line=$line$character; fi
+		fi
+	else
+		# Avoid busy-looping if the console goes away; PID 1 stays alive.
+		/bin/sleep 1
+	fi
+done

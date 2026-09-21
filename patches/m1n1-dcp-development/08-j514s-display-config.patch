@@ -1,0 +1,79 @@
+From: M3 Pro offline development
+Subject: [PATCH] dcp: select J514s display reset configuration for internal DCP
+
+Base: m1n1 60e53e7078c5cb7efce32d64bf50829e9401e44f.
+Development-only; not selected by any boot builder. Exact J514s ADT names
+DISP_CPU as the physical parent of DCP0-V; native reset/lifecycle unverified.
+
+diff --git a/src/dcp.c b/src/dcp.c
+index fb7b6cc..777d691 100644
+--- a/src/dcp.c
++++ b/src/dcp.c
+@@ -148,14 +148,21 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+ {
+     u32 sid;
+ 
+-    if (cfg && cfg->dptx_phy[0]) {
+-        if (os_firmware.version != V13_5) {
+-            printf("dcp: dtpx-port is only supported with V13_5 OS firmware.\n");
+-            return NULL;
+-        }
++    if (!cfg || !cfg->pmgr_dev[0] ||
++        strnlen(cfg->pmgr_dev, sizeof(cfg->pmgr_dev)) >= sizeof(dcp_pmgr_dev)) {
++        printf("dcp: invalid display configuration\n");
++        return NULL;
++    }
++
++    if (cfg->dptx_phy[0] && os_firmware.version != V13_5) {
++        printf("dcp: dtpx-port is only supported with V13_5 OS firmware.\n");
++        return NULL;
++    }
++
++    strncpy(dcp_pmgr_dev, cfg->pmgr_dev, sizeof(dcp_pmgr_dev));
++    dcp_die = cfg->die;
+ 
+-        strncpy(dcp_pmgr_dev, cfg->pmgr_dev, sizeof(dcp_pmgr_dev));
+-        dcp_die = cfg->die;
++    if (cfg->dptx_phy[0]) {
+         pmgr_adt_power_enable(cfg->dcp);
+         pmgr_adt_power_enable(cfg->dptx_phy);
+         mdelay(25);
+diff --git a/src/display.c b/src/display.c
+index e1a66c7..fdd286d 100644
+--- a/src/display.c
++++ b/src/display.c
+@@ -43,6 +43,14 @@ static const display_config_t display_config_m1 = {
+     .dcp_alias = "dcp",
+ };
+ 
++static const display_config_t display_config_j514s = {
++    .dcp = "/arm-io/dcp",
++    .dcp_dart = "/arm-io/dart-dcp",
++    .disp_dart = "/arm-io/dart-disp0",
++    .pmgr_dev = "DISP_CPU",
++    .dcp_alias = "dcp",
++};
++
+ #define USE_DCPEXT 1
+ 
+ static const display_config_t display_config_m2 = {
+@@ -57,8 +65,6 @@ static const display_config_t display_config_m2 = {
+     .dcp = "/arm-io/dcp",
+     .dcp_dart = "/arm-io/dart-dcp",
+     .disp_dart = "/arm-io/dart-disp0",
+-    .dp2hdmi_gpio = "/arm-io/dp2hdmi-gpio",
+-    .dptx_phy = "/arm-io/dptx-phy",
+     .pmgr_dev = "DISP0_CPU0",
+     .dcp_alias = "dcp",
+     .dcp_index = 0,
+@@ -247,7 +253,9 @@ const display_config_t *display_get_config(void)
+ {
+     const display_config_t *conf = NULL;
+ 
+-    if (adt_is_compatible(adt, 0, "J473AP"))
++    if (adt_is_compatible(adt, 0, "J514sAP"))
++        conf = &display_config_j514s;
++    else if (adt_is_compatible(adt, 0, "J473AP"))
+         conf = &display_config_m2;
+     else if (adt_is_compatible(adt, 0, "J474sAP") || adt_is_compatible(adt, 0, "J475cAP"))
+         conf = &display_config_m2_pro_max;

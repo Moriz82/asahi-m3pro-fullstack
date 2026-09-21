@@ -1,0 +1,109 @@
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -775,6 +775,7 @@
+ {
+ 	struct of_phandle_args ph_args;
+ 	u32 addr_idx, disp_idx, offset;
++	u32 width = of_device_is_compatible(dcp->dev->of_node, "apple,t6030-dcp") ? 8 : 4;
+ 	int ret;
+ 
+ 	ret = of_parse_phandle_with_args(dcp->dev->of_node, "apple,bw-scratch",
+@@ -808,7 +809,8 @@
+ 			addr_idx, ph_args.np);
+ 		goto err_of_node_put;
+ 	}
+-	if (offset > resource_size(&dcp->disp_bw_scratch_res) - 4) {
++	if (resource_size(&dcp->disp_bw_scratch_res) < width ||
++	    offset > resource_size(&dcp->disp_bw_scratch_res) - width) {
+ 		ret = -EINVAL;
+ 		goto err_of_node_put;
+ 	}
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -117,15 +117,6 @@
+ 	u32 ret;
+ } __packed;
+ 
+-struct dcp_rt_bandwidth {
+-	u64 unk1;
+-	u64 reg_scratch;
+-	u64 reg_doorbell;
+-	u32 unk2;
+-	u32 doorbell_bit;
+-	u32 padding[7];
+-} __packed;
+-
+ struct frame_sync_props {
+ 	u8 unk[28];
+ };
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -17,6 +17,22 @@
+ #include "plane.h"
+ #include "version_utils.h"
+ 
++struct DCP_FW_NAME(dcp_rt_bandwidth) {
++	u64 unk1;
++	u64 reg_scratch;
++	u64 reg_doorbell;
++	u32 unk2;
++	u32 doorbell_bit;
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++	u32 padding[3];
++	u32 scratch_size;
++	u32 padding2[2];
++	u32 ret;
++#else
++	u32 padding[7];
++#endif
++} __packed;
++
+ struct DCP_FW_NAME(dcp_swap) {
+ 	u64 ts1;
+ 	u64 ts2;
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -679,9 +679,9 @@
+ 	};
+ }
+ 
+-static struct dcp_rt_bandwidth dcpep_cb_rt_bandwidth(struct apple_dcp *dcp)
++static struct DCP_FW_NAME(dcp_rt_bandwidth) dcpep_cb_rt_bandwidth(struct apple_dcp *dcp)
+ {
+-	struct dcp_rt_bandwidth rt_bw = (struct dcp_rt_bandwidth){
++	struct DCP_FW_NAME(dcp_rt_bandwidth) rt_bw = {
+ 			.reg_scratch = 0,
+ 			.reg_doorbell = 0,
+ 			.doorbell_bit = 0,
+@@ -702,8 +702,18 @@
+ 		 * setting this immediately during modeset on 12.3 and 13.5
+ 		 * firmware.
+ 		 */
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++		rt_bw.scratch_size = 4;
++#else
+ 		rt_bw.padding[3] = 0x4;
++#endif
+ 	}
++
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++	/* Exact T6030/23J220 PMP descriptor: 8-byte scratch, status at +56. */
++	if (of_device_is_compatible(dcp->dev->of_node, "apple,t6030-dcp"))
++		rt_bw.scratch_size = 8;
++#endif
+ 
+ 	return rt_bw;
+ }
+@@ -1127,7 +1137,7 @@
+ TRAMPOLINE_INOUT(trampoline_allocate_bandwidth, dcpep_cb_allocate_bandwidth,
+ 	       struct dcp_allocate_bandwidth_req, struct dcp_allocate_bandwidth_resp);
+ TRAMPOLINE_OUT(trampoline_rt_bandwidth, dcpep_cb_rt_bandwidth,
+-	       struct dcp_rt_bandwidth);
++	       struct DCP_FW_NAME(dcp_rt_bandwidth));
+ TRAMPOLINE_INOUT(trampoline_set_frame_sync_props, dcpep_cb_set_frame_sync_props,
+ 	       struct dcp_set_frame_sync_props_req,
+ 	       struct dcp_set_frame_sync_props_resp);

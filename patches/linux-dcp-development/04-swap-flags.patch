@@ -1,0 +1,28 @@
+From 44c5398f9b0dae0f98776cba952d265250d6c662 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Sun, 26 Jul 2026 09:06:39 +1000
+Subject: [PATCH] drm: apple: Expose two flag fields at the end of IOMFBSwapRec
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb_template.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index 49bab7c53c6e23..c08d31b177c822 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -73,10 +73,12 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u8  bl_power; // constant 0x40 for on
+ 	u8 unk_2f3[0x2d];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	u8 unk_320[0x147];
++	u8 unk_320[0x13f];
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+ 	u8 unk_14_7_2[0x30];
+ #endif
++	u32 unk_flags;
++	u32 unk_flags2;
+ #endif
+ } __packed;
+ 

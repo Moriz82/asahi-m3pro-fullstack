@@ -1,0 +1,478 @@
+From 20ea89d8dcfdfe36ad5367b69b53f83c67ec7744 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Sun, 12 Jul 2026 23:40:24 +1000
+Subject: [PATCH] WIP: drm: apple: Add 14.7 FW ABI
+
+Asahi Linux will target the firmware ABI from macOS 14.8.3
+for i/mBoot-loaded firmware on M3 series machines. This
+version identifies itself as v14.7, so add it as such to
+the DCP driver.
+
+Most things are working, except for EDID retrieval for external
+displays and audio over HDMI/DisplayPort. There is also an issue
+where DCP will try to read destroyed/invisible framebuffers for
+some reason or another, causing IOVA faults. We will need to
+figure out how to get the new firmware to clear surfaces and
+stop reading the nonexistent framebuffers at the very least before
+shipping.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/Makefile         |   1 +
+ drivers/gpu/drm/apple/av.c             |   1 +
+ drivers/gpu/drm/apple/dcp-internal.h   |   2 +
+ drivers/gpu/drm/apple/dcp.c            |  12 +++
+ drivers/gpu/drm/apple/iomfb.c          |  12 +++
+ drivers/gpu/drm/apple/iomfb.h          |   3 +-
+ drivers/gpu/drm/apple/iomfb_template.c |  11 ++-
+ drivers/gpu/drm/apple/iomfb_template.h |  30 ++++++-
+ drivers/gpu/drm/apple/iomfb_v12_3.c    |   2 +
+ drivers/gpu/drm/apple/iomfb_v13_3.c    |   2 +
+ drivers/gpu/drm/apple/iomfb_v14_7.c    | 118 +++++++++++++++++++++++++
+ drivers/gpu/drm/apple/iomfb_v14_7.h    |  17 ++++
+ drivers/gpu/drm/apple/version_utils.h  |   1 +
+ 13 files changed, 206 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/gpu/drm/apple/iomfb_v14_7.c
+ create mode 100644 drivers/gpu/drm/apple/iomfb_v14_7.h
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index b22839bdd611a7..b0a7dbfbcaca83 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -10,6 +10,7 @@ appledrm-y += connector.o
+ appledrm-y += ibootep.o
+ appledrm-y += iomfb_v12_3.o
+ appledrm-y += iomfb_v13_3.o
++appledrm-y += iomfb_v14_7.o
+ appledrm-y += epic/dpavservep.o
+ appledrm-y += plane.o
+ 
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+index 0d3c752f62d5f5..ca4612df8696f4 100644
+--- a/drivers/gpu/drm/apple/av.c
++++ b/drivers/gpu/drm/apple/av.c
+@@ -393,6 +393,7 @@ int avep_init(struct apple_dcp *dcp)
+ 		audiosrv_data->cmds = dcp_av_audio_cmds_v12_3;
+ 		break;
+ 	case DCP_FIRMWARE_V_13_5:
++	case DCP_FIRMWARE_V_14_7:
+ 		audiosrv_data->cmds = dcp_av_audio_cmds_v13_5;
+ 		break;
+ 	default:
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 6042750f16019f..a2e992b8085136 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -18,6 +18,7 @@
+ #include "iomfb.h"
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v14_7.h"
+ #include "epic/dpavservep.h"
+ #include "version_utils.h"
+ 
+@@ -173,6 +174,7 @@ struct apple_dcp {
+ 	union {
+ 		struct dcp_swap_submit_req_v12_3 v12_3;
+ 		struct dcp_swap_submit_req_v13_3 v13_3;
++		struct dcp_swap_submit_req_v14_7_0 v14_7_0;
+ 	} swap;
+ 
+ 	/* swap id of the last completed swap */
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 272d1cef38e661..27b4c619c32afb 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -581,6 +581,9 @@ static void _dcp_poweroff(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweroff_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_poweroff_v14_7_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -640,6 +643,9 @@ static void __maybe_unused dcp_sleep(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_sleep_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_sleep_v14_7_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -665,6 +671,9 @@ void dcp_poweron(struct platform_device *pdev)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweron_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_poweron_v14_7_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -964,6 +973,9 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
+ 		return DCP_FIRMWARE_V_13_5;
+ 	else if (strncmp(compat_str, "13.5.0", sizeof(compat_str)) == 0)
+ 		return DCP_FIRMWARE_V_13_5;
++	else if (strncmp(compat_str, "14.7.0", sizeof(compat_str)) == 0 &&
++		(strncmp(fw_str, "14.7.0", sizeof(compat_str)) == 0))
++		return DCP_FIRMWARE_V_14_7;
+ 
+ 	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
+ 		compat_str, fw_str);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 1d9448f0f4dc47..17f1d1fd595614 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -436,6 +436,9 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+ 	case DCP_FIRMWARE_V_13_5:
+ 		ret = iomfb_modeset_v13_3(dcp, crtc_state);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		ret = iomfb_modeset_v14_7_0(dcp, crtc_state);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n",
+ 			  dcp->fw_compat);
+@@ -485,6 +488,9 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_flush_v13_3(dcp, crtc, state);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_flush_v14_7_0(dcp, crtc, commit);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -500,6 +506,9 @@ static void iomfb_start(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_start_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_start_v14_7_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -551,6 +560,9 @@ void iomfb_shutdown(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_shutdown_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_14_7:
++		iomfb_shutdown_v14_7_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 7903fad4040677..531089dab63134 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -78,7 +78,8 @@ struct dcp_packet_header {
+ #define DCP_PACKET_ALIGNMENT (0x40)
+ 
+ enum iomfb_property_id {
+-    IOMFB_PROPERTY_NITS = 15, // divide by Brightness_Scale
++    IOMFB_PROPERTY_NITS_V13_3 = 15, // divide by Brightness_Scale
++    IOMFB_PROPERTY_NITS_V14_7 = 19,
+ };
+ 
+ #define IOMFB_BRIGHTNESS_MIN 0x10000000
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 61429a9f9c2bfe..b4784cbbd0e637 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -200,7 +200,8 @@ static bool iomfbep_cb_match_backlight_service(struct apple_dcp *dcp, int tag, v
+ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *prop)
+ {
+ 	switch (prop->id) {
+-	case IOMFB_PROPERTY_NITS:
++	case IOMFB_PROPERTY_NITS_V13_3:
++	case IOMFB_PROPERTY_NITS_V14_7:
+ 	{
+ 		if (dcp_has_panel(dcp)) {
+ 			dcp->brightness.nits = prop->value / dcp->brightness.scale;
+@@ -909,7 +910,11 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	 * brightness.
+ 	 */
+ 	if (dcp_has_panel(dcp)) {
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 		swap->swap.bl_unk = 1;
++#else
++		swap->swap.bl_update = 1;
++#endif
+ 		swap->swap.bl_value = 0;
+ 		swap->swap.bl_power = 0;
+ 	}
+@@ -1394,7 +1399,11 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 
+ 	/* update brightness if changed */
+ 	if (dcp_has_panel(dcp) && dcp->brightness.update) {
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++		req->swap.bl_update = 1;
++#else
+ 		req->swap.bl_unk = 1;
++#endif
+ 		req->swap.bl_value = dcp->brightness.dac;
+ 		req->swap.bl_power = 0x40;
+ 		dcp->brightness.update = false;
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index 8efab49cc53d08..49bab7c53c6e23 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -30,7 +30,9 @@ struct DCP_FW_NAME(dcp_swap) {
+ 
+ 	u64 flags1;
+ 	u64 flags2;
+-
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 unk_v14_7[0x48];
++#endif
+ 	u32 swap_id;
+ 
+ 	u32 surf_ids[SWAP_SURFACES];
+@@ -42,22 +44,39 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u32 swap_completed;
+ 
+ 	u32 bg_color;
+-	u8 unk_110[0x1b8];
++	u8 unk_110[0x30];
++	u32 active_region_en[SWAP_SURFACES];
++	struct dcp_rect active_regions[SWAP_SURFACES];
++	u8 unk_190[0x138];
+ 	u32 unk_2c8;
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 	u8 unk_2cc[0x14];
++#else
++	u8 unk_2cc[0x40];
++#endif
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 	u32 unk_2e0;
++#else
++	u32 bl_update;
++#endif
+ #if DCP_FW_VER < DCP_FW_VERSION(13, 2, 0)
+ 	u16 unk_2e2;
+ #else
+ 	u8 unk_2e2[3];
+ #endif
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7 ,0)
+ 	u64 bl_unk;
++#else
++	u32 bl_unk;
++#endif
+ 	u32 bl_value; // min value is 0x10000000
+ 	u8  bl_power; // constant 0x40 for on
+ 	u8 unk_2f3[0x2d];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	u8 unk_320[0x13f];
+-	u64 unk_1;
++	u8 unk_320[0x147];
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 unk_14_7_2[0x30];
++#endif
+ #endif
+ } __packed;
+ 
+@@ -103,6 +122,9 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ 	u8 unkU32out_null;
+ #endif
+ 	u8 padding[1];
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 padding_14_7[0x234];
++#endif
+ } __packed;
+ 
+ struct DCP_FW_NAME(dcp_swap_submit_resp) {
+diff --git a/drivers/gpu/drm/apple/iomfb_v12_3.c b/drivers/gpu/drm/apple/iomfb_v12_3.c
+index 0fe08c42d64659..4d7492e76961fb 100644
+--- a/drivers/gpu/drm/apple/iomfb_v12_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v12_3.c
+@@ -1,8 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0-only OR MIT
+ /* Copyright The Asahi Linux Contributors */
+ 
++/* Include all per-version headers before defining DCP_FW ourself. */
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v14_7.h"
+ #include "version_utils.h"
+ 
+ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_3.c b/drivers/gpu/drm/apple/iomfb_v13_3.c
+index 0ac869d24eb01b..b3ceabb0d610a1 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_3.c
+@@ -1,8 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0-only OR MIT
+ /* Copyright The Asahi Linux Contributors */
+ 
++/* Include all per-version headers before defining DCP_FW ourself. */
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v14_7.h"
+ #include "version_utils.h"
+ 
+ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+diff --git a/drivers/gpu/drm/apple/iomfb_v14_7.c b/drivers/gpu/drm/apple/iomfb_v14_7.c
+new file mode 100644
+index 00000000000000..19f38cb039480d
+--- /dev/null
++++ b/drivers/gpu/drm/apple/iomfb_v14_7.c
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++/* Include all per-version headers before defining DCP_FW ourself. */
++#include "iomfb_v12_3.h"
++#include "iomfb_v13_3.h"
++#include "iomfb_v14_7.h"
++#include "version_utils.h"
++
++static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
++	IOMFB_METHOD("A000", dcpep_late_init_signal),
++	IOMFB_METHOD("A029", dcpep_setup_video_limits),
++	IOMFB_METHOD("A131", iomfbep_a131_pmu_service_matched),
++	IOMFB_METHOD("A132", iomfbep_a132_backlight_service_matched),
++	IOMFB_METHOD("A377", dcpep_set_create_dfb),
++	IOMFB_METHOD("A378", iomfbep_a358_vi_set_temperature_hint),
++	IOMFB_METHOD("A401", dcpep_start_signal),
++	IOMFB_METHOD("A406", dcpep_swap_start),
++	IOMFB_METHOD("A407", dcpep_swap_submit),
++	IOMFB_METHOD("A409", dcpep_set_display_device),
++	IOMFB_METHOD("A410", dcpep_is_main_display),
++	IOMFB_METHOD("A411", dcpep_set_digital_out_mode),
++	IOMFB_METHOD("A421", iomfbep_set_matrix),
++	IOMFB_METHOD("A425", iomfbep_get_color_remap_mode),
++	IOMFB_METHOD("A440", dcpep_set_parameter_dcp),
++	IOMFB_METHOD("A444", dcpep_create_default_fb),
++	IOMFB_METHOD("A443", dcpep_enable_disable_video_power_savings),
++	IOMFB_METHOD("A455", dcpep_first_client_open),
++	IOMFB_METHOD("A457", iomfbep_last_client_close),
++	IOMFB_METHOD("A463", dcpep_set_display_refresh_properties),
++	IOMFB_METHOD("A466", dcpep_flush_supports_power),
++	IOMFB_METHOD("A467", iomfbep_abort_swaps_dcp),
++	//IOMFB_METHOD("A471", dcpep_update_dfb_surface),
++	IOMFB_METHOD("A472", dcpep_set_power_state),
++};
++
++#define DCP_FW v14_7_0
++#define DCP_FW_VER DCP_FW_VERSION(14, 7, 0)
++
++#include "iomfb_template.c"
++
++static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
++	[0] = trampoline_true, /* did_boot_signal */
++	[1] = trampoline_true, /* did_power_on_signal */
++	[2] = trampoline_nop, /* will_power_off_signal */
++	[3] = trampoline_rt_bandwidth,
++	// [6] = trampoline_set_frame_sync_props,
++	[6] = trampoline_nop,
++	[100] = iomfbep_cb_match_pmu_service,
++	[101] = trampoline_zero, /* get_display_default_stride */
++	[102] = trampoline_nop, /* set_number_property */
++	[103] = trampoline_nop, /* trigger_user_cal_loader */
++	[104] = trampoline_nop, /* set_boolean_property */
++	[107] = trampoline_nop, /* remove_property */
++	[108] = trampoline_true, /* create_provider_service */
++	[109] = trampoline_true, /* create_product_service */
++	[110] = trampoline_true, /* create_pmu_service */
++	[111] = trampoline_true, /* create_iomfb_service */
++	[112] = trampoline_create_backlight_service,
++	[113] = trampoline_true, /* create_nvram_service? */
++	//[114] = trampoline_get_tiling_state,
++	//[115] = trampoline_false, /* set_tiling_state */
++	[121] = dcpep_cb_boot_1, /* is_dark_boot */
++	[122] = trampoline_false, /* is_dark_boot / is_waking_from_hibernate*/
++	[123] = trampoline_false,
++	[125] = trampoline_read_edt_data,
++	[127] = trampoline_prop_start,
++	[128] = trampoline_prop_chunk,
++	[129] = trampoline_prop_end,
++	// [129] = trampoline_allocate_bandwidth,
++	[201] = trampoline_map_piodma,
++	[202] = trampoline_unmap_piodma,
++	[206] = iomfbep_cb_match_pmu_service_2,
++	[207] = iomfbep_cb_match_backlight_service,
++	[208] = trampoline_nop, /* update_backlight_factor_prop */
++	[209] = trampoline_get_time,
++	[300] = trampoline_pr_publish,
++	[401] = trampoline_get_uint_prop,
++	[404] = trampoline_nop, /* sr_set_uint_prop */
++	[406] = trampoline_set_fx_prop,
++	[408] = trampoline_get_frequency,
++	[411] = trampoline_map_reg,
++	[413] = trampoline_true, /* sr_set_property_dict */
++	[414] = trampoline_sr_set_property_int,
++	[415] = trampoline_true, /* sr_set_property_bool */
++	[451] = trampoline_allocate_buffer,
++	[452] = trampoline_map_physical,
++	[454] = trampoline_release_mem_desc,
++	[552] = trampoline_true, /* set_property_dict_0 */
++	[561] = trampoline_true, /* set_property_dict */
++	[563] = trampoline_true, /* set_property_int */
++	[565] = trampoline_true, /* set_property_bool */
++	[567] = trampoline_true, /* set_property_str */
++	[574] = trampoline_zero, /* power_up_dart */
++	[576] = trampoline_hotplug,
++	[577] = trampoline_nop, /* powerstate_notify */
++	//[582] = trampoline_create_dfb_surface, /* create_default_fb_surface */
++	[582] = trampoline_true,
++	[584] = trampoline_nop, /* IOMobileFramebufferAP::clear_default_surface */
++	[588] = trampoline_nop, /* resize_default_fb_surface_gated */
++	[589] = trampoline_swap_complete,
++	[591] = trampoline_swap_complete_intent_gated,
++	[592] = trampoline_abort_swap_ap_gated,
++	[593] = trampoline_enable_backlight_message_ap_gated,
++	[594] = trampoline_nop, /* IOMobileFramebufferAP::setSystemConsoleMode */
++	[596] = trampoline_false, /* IOMobileFramebufferAP::isDFBAllocated */
++	[597] = trampoline_false, /* IOMobileFramebufferAP::preserveContents */
++	[598] = trampoline_nop, /* find_swap_function_gated */
++};
++void DCP_FW_NAME(iomfb_start)(struct apple_dcp *dcp)
++{
++	dcp->cb_handlers = cb_handlers;
++
++	dcp_start_signal(dcp, false, dcp_started, NULL);
++}
++
++#undef DCP_FW_VER
++#undef DCP_FW
+diff --git a/drivers/gpu/drm/apple/iomfb_v14_7.h b/drivers/gpu/drm/apple/iomfb_v14_7.h
+new file mode 100644
+index 00000000000000..7fd9b47fd372bc
+--- /dev/null
++++ b/drivers/gpu/drm/apple/iomfb_v14_7.h
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++#ifndef __APPLE_IOMFB_V14_7_H__
++#define __APPLE_IOMFB_V14_7_H__
++
++#include "version_utils.h"
++
++#define DCP_FW v14_7_0
++#define DCP_FW_VER DCP_FW_VERSION(14, 7, 0)
++
++#include "iomfb_template.h"
++
++#undef DCP_FW_VER
++#undef DCP_FW
++
++#endif /* __APPLE_IOMFB_V14_7_H__ */
+diff --git a/drivers/gpu/drm/apple/version_utils.h b/drivers/gpu/drm/apple/version_utils.h
+index 35f82e6ad56c01..242c156c755187 100644
+--- a/drivers/gpu/drm/apple/version_utils.h
++++ b/drivers/gpu/drm/apple/version_utils.h
+@@ -16,6 +16,7 @@ enum dcp_firmware_version {
+ 	DCP_FIRMWARE_UNKNOWN,
+ 	DCP_FIRMWARE_V_12_3,
+ 	DCP_FIRMWARE_V_13_5,
++	DCP_FIRMWARE_V_14_7,
+ };
+ 
+ #endif /*__APPLE_VERSION_UTILS_H__*/

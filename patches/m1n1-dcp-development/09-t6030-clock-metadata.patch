@@ -1,0 +1,38 @@
+diff --git a/proxyclient/m1n1/fw/dcp/manager.py b/proxyclient/m1n1/fw/dcp/manager.py
+--- a/proxyclient/m1n1/fw/dcp/manager.py
++++ b/proxyclient/m1n1/fw/dcp/manager.py
+@@ -328,5 +328,34 @@
+         return True
+ 
+     def sr_getClockFrequency(self, obj, arg):
++        if self.compatible == 't6030':
++            if (not ipc.Ver.check("V == V14_7") or obj != 'PROV' or
++                    type(arg) is not int or not 0 <= arg < 2):
++                raise ValueError("unverified T6030 clock request")
++            try:
++                adt = self.dcp.u.adt
++                arm_io, disp = adt['/arm-io'], adt['/arm-io/disp0']
++                if (adt.model != 'Mac15,6' or 'J514sAP' not in adt.compatible or
++                        list(arm_io.compatible) != ['arm-io,t6030'] or
++                        list(disp.compatible) != ['disp0,t6030']):
++                    raise ValueError("unverified T6030 clock provider")
++                ids = disp.getprop('clock-ids')
++                frequencies = arm_io.getprop('clock-frequencies')
++                kinds = arm_io.getprop('clock-frequencies-nclk')
++            except (AttributeError, KeyError, TypeError) as error:
++                raise ValueError("missing T6030 clock metadata") from error
++            if (not isinstance(ids, (list, tuple)) or list(ids) != [348, 412] or
++                    any(type(v) is not int for v in ids) or
++                    not isinstance(frequencies, (list, tuple)) or
++                    not isinstance(kinds, (list, tuple)) or not frequencies or
++                    len(frequencies) != len(kinds) or
++                    any(type(v) is not int or not 0 <= v <= 0xffffffff for v in frequencies) or
++                    any(type(v) is not int or not 0 <= v <= 3 for v in kinds)):
++                raise ValueError("invalid T6030 clock table")
++            # AppleH15IO uses base 256. AppleARMIO returns zero for a declared
++            # clock ID outside the published table; an in-table zero is valid.
++            # Always consult the caller's boot ADT, never a saved-host constant.
++            index = ids[arg] - 256
++            return frequencies[index] if index < len(frequencies) else 0
+         print(f"sr_getClockFrequency({obj}, {arg})")
+         return 533333328

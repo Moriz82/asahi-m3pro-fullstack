@@ -1,0 +1,107 @@
+diff --git a/proxyclient/m1n1/fw/dcp/ipc.py b/proxyclient/m1n1/fw/dcp/ipc.py
+index fe09749..4af5dd9 100644
+--- a/proxyclient/m1n1/fw/dcp/ipc.py
++++ b/proxyclient/m1n1/fw/dcp/ipc.py
+@@ -401,7 +401,10 @@ rt_bw_config_t = Struct(
+     "reg2" / Int64ul,
+     "unk2" / UnkBytes(4),
+     "bit" / Int32ul,
+-    "padding" / UnkBytes(0x1c),
++    Ver("V != V14_7", "padding" / UnkBytes(0x1c)),
++    Ver("V == V14_7", "padding" / UnkBytes(12)),
++    Ver("V == V14_7", "scratch_size" / Default(Int32ul, 0)),
++    Ver("V == V14_7", "padding2" / UnkBytes(8)),
+ )
+ 
+ frame_sync_props_t = Struct(
+@@ -608,7 +611,10 @@ class UPPipeAP_H13P(IPCObject):
+     D000 = Callback(bool_, "did_boot_signal")
+     D001 = Callback(bool_, "did_power_on_signal")
+     D002 = Callback(void, "will_power_off_signal")
+-    D003 = Callback(void, "rt_bandwidth_setup_ap", config=OutPtr(rt_bw_config_t))
++    if Ver.check("V == V14_7"):
++        D003 = Callback(IOMFBStatus, "rt_bandwidth_setup_ap", config=OutPtr(rt_bw_config_t))
++    else:
++        D003 = Callback(void, "rt_bandwidth_setup_ap", config=OutPtr(rt_bw_config_t))
+     D006 = Callback(void, "set_frame_sync_props", props=InOutPtr(frame_sync_props_t))
+ 
+ IdleCachingState = uint32_t
+diff --git a/proxyclient/m1n1/fw/dcp/manager.py b/proxyclient/m1n1/fw/dcp/manager.py
+index 35586a3..45e1136 100644
+--- a/proxyclient/m1n1/fw/dcp/manager.py
++++ b/proxyclient/m1n1/fw/dcp/manager.py
+@@ -155,8 +155,69 @@ class DCPManager(DCPBaseManager):
+                 "reg2": 0x0,
+                 "bit": 0,
+             }
++        elif self.compatible == 't6030':
++            # Development-only J514s / 23J220 contract. Read ADT metadata only;
++            # do not initialize PMP, map registers or copy macOS runtime IOVAs.
++            if config is None or not ipc.Ver.check("V == V14_7"):
++                raise ValueError("T6030 bandwidth requires a V14.7 output buffer")
++            adt = self.dcp.u.adt
++            disp = adt['/arm-io/disp0']
++            pmgr = adt['/arm-io/pmgr']
++            pmp = adt['/arm-io/pmp/iop-pmp-nub']
++            if (adt.model != 'Mac15,6' or 'J514sAP' not in adt.compatible or
++                    list(disp.compatible) != ['disp0,t6030'] or
++                    list(pmgr.compatible) != ['pmgr1,t6030'] or
++                    pmgr.getprop('pmp') != 2 or pmgr.getprop('pmc', 0) != 0):
++                raise ValueError("unverified T6030 bandwidth provider")
++            func = disp.getprop('function-bw_req_interrupt0')
++            if (func is None or func.phandle != pmgr.getprop('AAPL,phandle') or
++                    func.name != 'BIRQ' or list(func.args) != [39]):
++                raise ValueError("unverified display bandwidth function")
++            devices = [dev for dev in pmgr.devices if dev.id2 == func.args[0]]
++            if len(devices) != 1 or devices[0].name != 'DISP_SYS' or devices[0].id1 != 8:
++                raise ValueError("unverified display PMP device")
++
++            # ApplePMGR::_initPMPv2 selects ptd-ranges[3], then assigns bandwidth
++            # ranks in soc-device order only to records with word 12 nonzero.
++            handles = pmgr.getprop('ptd-ranges')
++            ranges = pmp.getprop('ptd-range')
++            soc = pmp.getprop('soc-device')
++            if (not isinstance(handles, bytes) or len(handles) != 24 or
++                    not isinstance(ranges, bytes) or not ranges or len(ranges) % 32 or
++                    not isinstance(soc, bytes) or not soc or len(soc) % 124):
++                raise ValueError("malformed PMP bandwidth tables")
++            handle = struct.unpack('<6I', handles)[3]
++            selected = [r for r in struct.iter_unpack('<8I', ranges) if r[0] == handle]
++            records = list(struct.iter_unpack('<31I', soc))
++            ids = [r[0] for r in records]
++            bandwidth_ids = [r[0] for r in records if r[12]]
++            if (len(selected) != 1 or len(set(ids)) != len(ids) or
++                    devices[0].id1 not in bandwidth_ids):
++                raise ValueError("ambiguous or missing PMP bandwidth entry")
++            rank = bandwidth_ids.index(devices[0].id1)
++            if rank >= selected[0][2]:
++                raise ValueError("PMP bandwidth rank outside PTD range")
++            offset = 8 * (selected[0][1] + rank)
++            if offset != 0x988 or len(disp.reg) != 6:
++                raise ValueError("unverified T6030 bandwidth register layout")
++            pmgr_base, pmgr_size = pmgr.get_reg(40)
++            scratch_base, scratch_size = disp.get_reg(5)
++            if (not 0 < pmgr_base < 1 << 64 or pmgr_size <= 0 or
++                    pmgr_base + pmgr_size > 1 << 64 or
++                    scratch_base != pmgr_base + 0x10000 or scratch_base % 8 or
++                    scratch_size < offset + 8 or
++                    scratch_base + scratch_size > pmgr_base + pmgr_size):
++                raise ValueError("T6030 bandwidth scratch outside PMGR resource")
++            config.val = {
++                "reg1": scratch_base + offset,
++                "reg2": 0,
++                "bit": 0,
++                "scratch_size": 8,
++            }
+         else:
+             raise ValueError(self.compatible)
++        if ipc.Ver.check("V == V14_7"):
++            return 0
+ 
+     ## UnifiedPipeline2 methods
+ 
+@@ -316,4 +377,3 @@ class DCPManager(DCPBaseManager):
+ 
+         self.mapid += 1
+         return self.mapid
+-

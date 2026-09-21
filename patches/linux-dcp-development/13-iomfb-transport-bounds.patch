@@ -1,0 +1,258 @@
+From: M3 Pro development program
+Subject: [PATCH 13/13] drm/apple: bound IOMFB windows and preserve nested frames
+
+Development only. Reject malformed transport envelopes before writes or stack
+changes. Preserve TX window occupancy across CMD/CB and complete ACKs using
+saved output pointers rather than untrusted or omitted envelope fields.
+Per-handler ABI sizes and transport recovery remain separate WIP debt.
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 308b820..f3e6bc8 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -69,8 +69,9 @@ struct dcp_channel {
+ 	void *cookies[DCP_MAX_CALL_DEPTH];
+ 	void *output[DCP_MAX_CALL_DEPTH];
+ 	u16 end[DCP_MAX_CALL_DEPTH];
++	bool is_callback[DCP_MAX_CALL_DEPTH];
+ 
+-	/* Current depth of the call stack. Less than DCP_MAX_CALL_DEPTH */
++	/* Number of occupied frames, at most DCP_MAX_CALL_DEPTH. */
+ 	u8 depth;
+ 	/* Already warned about busy channel */
+ 	bool warned_busy;
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 0d2821b..9d4e0e5 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -10,6 +10,7 @@
+ 
+ /* Fixed size of shared memory between DCP and AP */
+ #define DCP_SHMEM_SIZE 0x100000
++#define DCP_CHANNEL_SIZE 0x8000
+ 
+ /* DCP message contexts */
+ enum dcp_context_id {
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index e5b4684..e993bf4 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -128,29 +128,17 @@ static struct dcp_channel *dcp_get_channel(struct apple_dcp *dcp,
+ 	}
+ }
+ 
+-/* Get the start of a packet: after the end of the previous packet */
+-static u16 dcp_packet_start(struct dcp_channel *ch, u8 depth)
++/* Callbacks and nested commands use different shared-memory windows. */
++static u16 dcp_packet_end(struct dcp_channel *ch, bool callback)
+ {
+-	if (depth > 0)
+-		return ch->end[depth - 1];
+-	else
+-		return 0;
+-}
+-
+-/* Pushes and pops the depth of the call stack with safety checks */
+-static u8 dcp_push_depth(u8 *depth)
+-{
+-	u8 ret = (*depth)++;
+-
+-	WARN_ON(ret >= DCP_MAX_CALL_DEPTH);
+-	return ret;
+-}
++	u8 depth = ch->depth;
+ 
+-static u8 dcp_pop_depth(u8 *depth)
+-{
+-	WARN_ON((*depth) == 0);
+-
+-	return --(*depth);
++	while (depth) {
++		depth--;
++		if (ch->is_callback[depth] == callback)
++			return ch->end[depth];
++	}
++	return 0;
+ }
+ 
+ /* Call a DCP function given by a tag */
+@@ -160,6 +148,8 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
+ {
+ 	enum dcp_context_id context = dcp_call_context(dcp, oob);
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
++	struct dcp_channel *cmd = oob ? &dcp->ch_oobcmd : &dcp->ch_cmd;
++	struct dcp_channel *callback = oob ? &dcp->ch_oobcb : &dcp->ch_cb;
+ 
+ 	struct dcp_packet_header header = {
+ 		.in_len = in_len,
+@@ -172,12 +162,31 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
+ 		.tag[3] = call->tag[0],
+ 	};
+ 
+-	u8 depth = dcp_push_depth(&ch->depth);
+-	u16 offset = dcp_packet_start(ch, depth);
++	u8 depth;
++	u16 offset;
++	void *out, *out_data;
++	size_t data_len;
++
++	if (!dcp->shmem || cmd->depth > DCP_MAX_CALL_DEPTH ||
++	    callback->depth > DCP_MAX_CALL_DEPTH || ch->depth >= DCP_MAX_CALL_DEPTH ||
++	    (in_len && !data)) {
++		dev_warn(dcp->dev, "Invalid command channel state\n");
++		return;
++	}
++
++	/* CMD and CB (likewise OOBCMD and OOBCB) share their TX window. */
++	offset = max(dcp_packet_end(cmd, false), dcp_packet_end(callback, false));
++	if (offset > DCP_CHANNEL_SIZE - sizeof(header) ||
++	    in_len > DCP_CHANNEL_SIZE - offset - sizeof(header) ||
++	    out_len > DCP_CHANNEL_SIZE - offset - sizeof(header) - in_len) {
++		dev_warn(dcp->dev, "Command exceeds channel window\n");
++		return;
++	}
+ 
+-	void *out = dcp->shmem + dcp_tx_offset(context) + offset;
+-	void *out_data = out + sizeof(header);
+-	size_t data_len = sizeof(header) + in_len + out_len;
++	data_len = sizeof(header) + in_len + out_len;
++	depth = ch->depth++;
++	out = dcp->shmem + dcp_tx_offset(context) + offset;
++	out_data = out + sizeof(header);
+ 
+ 	memcpy(out, &header, sizeof(header));
+ 
+@@ -190,6 +199,7 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
+ 	ch->cookies[depth] = cookie;
+ 	ch->output[depth] = out + sizeof(header) + in_len;
+ 	ch->end[depth] = offset + ALIGN(data_len, DCP_PACKET_ALIGNMENT);
++	ch->is_callback[depth] = false;
+ 
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT,
+ 			 dcpep_msg(context, data_len, offset));
+@@ -219,7 +229,13 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)
+ {
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
+ 
+-	dcp_pop_depth(&ch->depth);
++	if (!ch || !ch->depth || ch->depth > DCP_MAX_CALL_DEPTH ||
++	    !ch->is_callback[ch->depth - 1]) {
++		dev_warn(dcp->dev, "No callback to acknowledge on context %u\n", context);
++		return;
++	}
++	ch->depth--;
++	ch->output[ch->depth] = NULL;
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT,
+ 			 dcpep_ack(context));
+ }
+@@ -263,14 +279,24 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 			    void *data, u32 length, u16 offset)
+ {
+ 	struct device *dev = dcp->dev;
+-	struct dcp_packet_header *hdr = data;
++	struct dcp_packet_header header, *hdr = &header;
+ 	void *in, *out;
+ 	int tag;
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
+ 	u8 depth;
+ 
+-	if (length < sizeof(*hdr)) {
+-		dev_warn(dev, "Truncated callback header\n");
++	if (!ch || ch->depth >= DCP_MAX_CALL_DEPTH ||
++	    (offset & (DCP_PACKET_ALIGNMENT - 1)) || offset >= DCP_CHANNEL_SIZE ||
++	    length < sizeof(*hdr) || length > DCP_CHANNEL_SIZE - offset) {
++		dev_warn(dev, "Invalid callback envelope\n");
++		return;
++	}
++	/* Snapshot lengths before using them for bounds, clearing or dispatch. */
++	memcpy(hdr, data, sizeof(*hdr));
++	if (hdr->in_len > length - sizeof(*hdr) ||
++	    hdr->out_len > length - sizeof(*hdr) - hdr->in_len ||
++	    offset < dcp_packet_end(ch, true)) {
++		dev_warn(dev, "Invalid callback payload\n");
+ 		return;
+ 	}
+ 	tag = dcp_parse_tag(hdr->tag);
+@@ -296,37 +322,42 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 	if (hdr->out_len)
+ 		memset(out, 0, hdr->out_len);
+ 
+-	depth = dcp_push_depth(&ch->depth);
++	depth = ch->depth++;
++	ch->callbacks[depth] = NULL;
++	ch->cookies[depth] = NULL;
+ 	ch->output[depth] = out;
+ 	ch->end[depth] = offset + ALIGN(length, DCP_PACKET_ALIGNMENT);
++	ch->is_callback[depth] = true;
+ 
+ 	if (dcp->cb_handlers[tag](dcp, tag, out, in))
+ 		dcp_ack(dcp, context);
+ }
+ 
+-static void dcpep_handle_ack(struct apple_dcp *dcp, enum dcp_context_id context,
+-			     void *data, u32 length)
++static void dcpep_handle_ack(struct apple_dcp *dcp, enum dcp_context_id context)
+ {
+-	struct dcp_packet_header *header = data;
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
+-	void *cookie;
++	void *cookie, *output;
+ 	dcp_callback_t cb;
+ 
+-	if (!ch) {
++	if (dcp_tx_offset(context) < 0 || !ch || !ch->depth ||
++	    ch->depth > DCP_MAX_CALL_DEPTH || ch->is_callback[ch->depth - 1]) {
+ 		dev_warn(dcp->dev, "ignoring ack on context %X\n", context);
+ 		return;
+ 	}
+ 
+-	dcp_pop_depth(&ch->depth);
++	ch->depth--;
+ 
+ 	cb = ch->callbacks[ch->depth];
+ 	cookie = ch->cookies[ch->depth];
++	output = ch->output[ch->depth];
+ 
+ 	ch->callbacks[ch->depth] = NULL;
+ 	ch->cookies[ch->depth] = NULL;
++	ch->output[ch->depth] = NULL;
+ 
++	/* ACK envelopes need not repeat the command's offset or length. */
+ 	if (cb)
+-		cb(dcp, data + sizeof(*header) + header->in_len, cookie);
++		cb(dcp, output, cookie);
+ }
+ 
+ static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)
+@@ -341,19 +372,26 @@ static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)
+ 	offset = FIELD_GET(IOMFB_MSG_OFFSET, message);
+ 	length = FIELD_GET(IOMFB_MSG_LENGTH, message);
+ 
++	if (!dcp->shmem) {
++		dev_warn(dcp->dev, "Message before shared memory setup\n");
++		return;
++	}
++	if (FIELD_GET(IOMFB_MSG_ACK, message)) {
++		dcpep_handle_ack(dcp, ctx_id);
++		return;
++	}
++
+ 	channel_offset = dcp_channel_offset(ctx_id);
+ 
+-	if (channel_offset < 0) {
++	if (channel_offset < 0 || ctx_id == DCP_CONTEXT_CMD ||
++	    ctx_id == DCP_CONTEXT_OOBCMD) {
+ 		dev_warn(dcp->dev, "invalid context received %u\n", ctx_id);
+ 		return;
+ 	}
+ 
+ 	data = dcp->shmem + channel_offset + offset;
+ 
+-	if (FIELD_GET(IOMFB_MSG_ACK, message))
+-		dcpep_handle_ack(dcp, ctx_id, data, length);
+-	else
+-		dcpep_handle_cb(dcp, ctx_id, data, length, offset);
++	dcpep_handle_cb(dcp, ctx_id, data, length, offset);
+ }
+ 
+ int dcp_get_modes(struct drm_connector *connector)

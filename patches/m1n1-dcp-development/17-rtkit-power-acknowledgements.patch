@@ -1,0 +1,167 @@
+diff --git a/src/rtkit.c b/src/rtkit.c
+index c1a2787..fb9fb07 100644
+--- a/src/rtkit.c
++++ b/src/rtkit.c
+@@ -70,6 +70,9 @@
+ #define RTKIT_MIN_VERSION 11
+ #define RTKIT_MAX_VERSION 12
+ 
++#define RTKIT_RECV_BUDGET      16
++#define RTKIT_POWER_TIMEOUT_US 1000000
++
+ enum rtkit_power_state {
+     RTKIT_POWER_OFF = 0x00,
+     RTKIT_POWER_SLEEP = 0x01,
+@@ -91,6 +94,9 @@ struct rtkit_dev {
+ 
+     enum rtkit_power_state iop_power;
+     enum rtkit_power_state ap_power;
++    u32 iop_power_acks, ap_power_acks;
++    /* A published transition without completion cannot safely be retried. */
++    bool power_uncertain;
+ 
+     struct rtkit_buffer syslog_bfr;
+     struct rtkit_buffer crashlog_bfr;
+@@ -412,7 +418,9 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
+     if (rtk->crashed)
+         return -1;
+ 
+-    while (asc_recv(rtk->asc, &asc_msg)) {
++    /* Yield even under continuous system/invalid traffic so callers can time out. */
++    for (unsigned received = 0;
++         received < RTKIT_RECV_BUDGET && asc_recv(rtk->asc, &asc_msg); received++) {
+         if (asc_msg.msg1 >= 0x100) {
+             rtkit_printf("WARNING: received message for invalid endpoint %x >= 0x100\n",
+                          asc_msg.msg1);
+@@ -432,9 +440,11 @@ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg)
+                 switch (msgtype) {
+                     case MGMT_MSG_IOP_PWR_STATE_ACK:
+                         rtk->iop_power = FIELD_GET(MGMT_PWR_STATE, msg->msg);
++                        rtk->iop_power_acks++;
+                         break;
+                     case MGMT_MSG_AP_PWR_STATE_ACK:
+                         rtk->ap_power = FIELD_GET(MGMT_PWR_STATE, msg->msg);
++                        rtk->ap_power_acks++;
+                         break;
+                     default:
+                         rtkit_printf("unknown management message %x\n", msgtype);
+@@ -692,14 +702,35 @@ bool rtkit_boot(rtkit_dev_t *rtk)
+     return true;
+ }
+ 
++static bool rtkit_power_drain(rtkit_dev_t *rtk, u64 deadline)
++{
++    /* Counters identify observed progress, not wire transaction IDs. Remove
++     * already queued ACKs before publishing another power request. */
++    while (rtkit_can_recv(rtk)) {
++        if (timeout_expired(deadline)) {
++            rtkit_printf("power transition mailbox drain timed out\n");
++            return false;
++        }
++        struct rtkit_message msg;
++        if (rtkit_recv(rtk, &msg) < 0)
++            return false;
++    }
++    return !rtk->crashed;
++}
++
+ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state target)
+ {
+     struct asc_message msg;
+ 
+-    if (rtk->crashed)
++    if (rtk->crashed || rtk->power_uncertain)
++        return false;
++
++    u64 deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
++    if (!rtkit_power_drain(rtk, deadline))
+         return false;
+ 
+     /* AP power should always go to QUIESCED, otherwise rebooting doesn't work */
++    u32 ap_acks = rtk->ap_power_acks;
+     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_AP_PWR_STATE) |
+                FIELD_PREP(MGMT_PWR_STATE, RTKIT_POWER_QUIESCED);
+     msg.msg1 = RTKIT_EP_MGMT;
+@@ -708,7 +739,13 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
+         return false;
+     }
+ 
+-    while (rtk->ap_power != RTKIT_POWER_QUIESCED) {
++    rtk->power_uncertain = true;
++    deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
++    while (rtk->ap_power != RTKIT_POWER_QUIESCED || rtk->ap_power_acks == ap_acks) {
++        if (timeout_expired(deadline)) {
++            rtkit_printf("AP power acknowledgement timed out\n");
++            return false;
++        }
+         struct rtkit_message rtk_msg;
+         int ret = rtkit_recv(rtk, &rtk_msg);
+ 
+@@ -722,13 +759,25 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
+         }
+     }
+ 
++    /* The last receive batch may have ended at the AP ACK while an older IOP
++     * ACK is still queued. Drain it before taking the next counter snapshot. */
++    if (!rtkit_power_drain(rtk, deadline) || rtk->ap_power != RTKIT_POWER_QUIESCED)
++        return false;
++
++    /* An IOP ACK seen during the AP phase cannot complete this new request. */
++    u32 iop_acks = rtk->iop_power_acks;
+     msg.msg0 = FIELD_PREP(MGMT_TYPE, MGMT_MSG_IOP_PWR_STATE) | FIELD_PREP(MGMT_PWR_STATE, target);
+     if (!asc_send(rtk->asc, &msg)) {
+         rtkit_printf("unable to send shutdown message\n");
+         return false;
+     }
+ 
+-    while (rtk->iop_power != target) {
++    deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
++    while (rtk->iop_power != target || rtk->iop_power_acks == iop_acks) {
++        if (timeout_expired(deadline)) {
++            rtkit_printf("IOP power acknowledgement timed out\n");
++            return false;
++        }
+         struct rtkit_message rtk_msg;
+         int ret = rtkit_recv(rtk, &rtk_msg);
+ 
+@@ -742,6 +791,11 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
+         }
+     }
+ 
++    if (!rtkit_power_drain(rtk, deadline) || rtk->ap_power != RTKIT_POWER_QUIESCED ||
++        rtk->iop_power != target)
++        return false;
++
++    rtk->power_uncertain = false;
+     return true;
+ }
+ 
+@@ -752,10 +806,9 @@ bool rtkit_quiesce(rtkit_dev_t *rtk)
+ 
+ bool rtkit_sleep(rtkit_dev_t *rtk)
+ {
+-    int ret = rtkit_switch_power_state(rtk, RTKIT_POWER_SLEEP);
+-    if (ret < 0)
+-        return ret;
++    if (!rtkit_switch_power_state(rtk, RTKIT_POWER_SLEEP))
++        return false;
+ 
+     asc_cpu_stop(rtk->asc);
+-    return 0;
++    return true;
+ }
+diff --git a/src/rtkit.h b/src/rtkit.h
+index 85badd5..18fcc4b 100644
+--- a/src/rtkit.h
++++ b/src/rtkit.h
+@@ -26,6 +26,10 @@ struct rtkit_buffer {
+ 
+ rtkit_dev_t *rtkit_init(const char *name, asc_dev_t *asc, dart_dev_t *dart,
+                         iova_domain_t *dart_iovad, sart_dev_t *sart, bool sram);
++/* Stop application endpoints before these calls: power transitions drain their
++ * messages. False is not permission to free buffers, mappings, or this owner.
++ * An uncertain published transition latches failure until the owner is replaced
++ * after independently establishing a safe reset; a late ACK cannot authorize retry. */
+ bool rtkit_quiesce(rtkit_dev_t *rtk);
+ bool rtkit_sleep(rtkit_dev_t *rtk);
+ void rtkit_free(rtkit_dev_t *rtk);

@@ -1,0 +1,43 @@
+From d04d611afff9adef16661f17cc1ad6f8f7e7d99f Mon Sep 17 00:00:00 2001
+From: a-ramses <abdicheramzi@gmail.com>
+Date: Fri, 28 Aug 2026 19:44:56 +0200
+Subject: [PATCH] drm: apple: iomfb: fix DCP 14.7 swap request layout
+
+DCP 14.7 expects its 0x234-byte extension before the pointer-null
+flags. Linux placed it after the flags, so DCP read the flags at the
+old offsets and rejected surface-clear requests.
+
+Move the extension before the pointer-null flags.
+
+Signed-off-by: a-ramses <abdicheramzi@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb_template.h | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index f3f93c17a050f9..8aea39d6664c9a 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -112,6 +112,9 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ 	u32 clear; // or maybe switch to default fb?
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u32 unkU32Ptr;
++#endif
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 padding_14_7[0x234];
+ #endif
+ 	u8 swap_null;
+ 	u8 surf_null[SWAP_SURFACES];
+@@ -124,12 +127,6 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ 	u8 unkU32out_null;
+ #endif
+ 	u8 padding[1];
+-#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+-	u8 padding_14_7[0x1e9];
+-	u8 unk_14_7_zero[0x46];
+-	u32 unk_14_7_u32;
+-	u8 unk_bool;
+-#endif
+ } __packed;
+ 
+ struct DCP_FW_NAME(dcp_swap_submit_resp) {

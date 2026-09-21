@@ -1,11 +1,23 @@
 # M3 Pro downstream Linux platform
 
 Downstream development workspace for the `Mac15,6` / `J514s` / `T6030`
-target. Native installation and persistent storage, firmware, boot-policy, or
-startup-disk changes are explicitly out of scope. A controlled, non-persistent
-tethered boot is in scope only through the Milestone 1 procedure after every
-safety and evidence gate passes; its scripts do not make a hardware-success
-claim on their own.
+target. Native installation, storage, firmware, boot-policy, and startup-disk
+operations are operator-gated and are never implied by a successful build or
+offline test. Controlled boot work follows the milestone procedures and their
+recovery/evidence gates; its scripts do not make a hardware-success claim on
+their own.
+
+> [!IMPORTANT]
+> **Current project status:** experimental bring-up, not daily-driver support.
+> A prior R13n2 loader reached Linux, while the later R13n3 diagnostic loader
+> regressed before the Arch userspace and was rolled back byte-for-byte to
+> R13n2. The rollback has not yet been confirmed by another native boot. GPU
+> startup remains blocked by the observed firmware-write translation denial
+> (`PAR=0x81f`); accelerated graphics, display lifecycle, cooling control, and
+> complete hardware acceptance remain open. Passing builds and offline tests
+> are not proof of native hardware support. Machine-local credentials, network
+> identities, firmware, vendor tools, source checkouts, and generated evidence
+> are intentionally excluded from this repository.
 
 The reproducible baseline builds pinned `m1n1`, U-Boot, and Linux fork commits
 inside Docker named volumes. Docker Desktop stores those volumes on a
@@ -78,6 +90,13 @@ nonblocking source-volume lock. Each package also carries a tree-derived
 verification requires the archive to match that independent closure before
 extracting it.
 
+Artifact inspection uses a separate immutable, read-only Arch Linux ARM executor
+with 48 version-matched tool/runtime packages. It requires no retained historical
+builder image, but preserves its manifest identity, package/full equality, all
+artifact comparisons, and the clean-rebuild requirements. Networking is disabled;
+only temporary extraction space is writable. See the
+[M0 inspection contract](docs/milestones/00-reproducible-baseline.md#read-only-artifact-inspection).
+
 The pinned Asahi Linux commit remains the recorded source base. A hash-pinned,
 mail-formatted downstream patch under `patches/linux/` fixes two Apple binding
 schema diagnostics found by the unfiltered check. The build applies it as a
@@ -96,6 +115,26 @@ automation. The rebuild script creates and removes only its exact temporary
 Docker volume; evidence remains under `out/isolated/rebuild-<run-id>/`.
 
 ## Milestone 1 controlled tether workflow
+
+The [2026-09-06 boot evidence and development checkpoint](docs/first-boot-development-2026-09-06.md)
+confirms one supplied Linux-HV guest boot with 11 CPUs and early diagnostic
+readiness. It does not establish native acceptance or full hardware support.
+A separate fixed-command, RAM-only development guest adds timed diagnostics
+and explicitly gated core-module probes without replacing the booted image.
+
+The [latest native-preparation checkpoint](docs/preboot-preparation-2026-09-05.md)
+records current backup, storage, and controller evidence and the remaining
+stop-before-boot steps. Native preparation is authorized; boot is not.
+
+The [Linux USB debug receiver](docs/usb-debug-linux.md) prepares a desktop agent
+to read m1n1's secondary-console logs. Its standalone host tests and bounded
+early-userspace diagnostic snapshots require no native boot. A live Linux USB
+kernel console still needs a separately approved hypervisor debug path.
+
+Offline [standalone dual-boot candidate tooling](docs/dualboot-candidate.md) can
+also package verified m1n1, Linux and the RAM-only initramfs into a self-contained
+stage-2 `boot.bin`. It does not install anything or replace the controlled M1
+procedure, recovery gates, or native hardware acceptance.
 
 The fail-closed Milestone 1 entry point, prerequisites, dry run, execution
 attestation, serial evidence, 20-run session assembly, and return-to-macOS/DFU
@@ -129,8 +168,9 @@ handoff:
 `tooling_valid=not-run`, `evidence_valid=not-provided`, and exits 2 with the
 native gate blocked. `evidence_valid=true` means the supplied evidence passed
 its verifier; `hardware_acceptance=false` means native support is not claimed.
-The aggregate static check emits `aggregate_tooling_valid=true` only after all
-tooling, self-test, and blocked-gate checks pass. M9 is terminal and accepts
+The aggregate static check emits `aggregate_tooling_valid=true` only after its
+static fixture tier and blocked-gate checks pass. This is not full source,
+artifact, or hardware acceptance. M9 is terminal and accepts
 only verified canonical M0–M8 handoffs plus an external, read-only hash anchor.
 Keep those nine inputs in a dedicated clean handoff root with exact directory
 names `M0` through `M8`; timestamped archives and test outputs must stay in a
@@ -140,8 +180,20 @@ For a reproducible host-independent check, build `build/Containerfile.static`
 and run `scripts/verify-all-software-tooling.sh --static` with the checkout
 read-only and a writable disposable `/tmp` root. The test tmpfs is executable
 because the adversarial fixtures create isolated fake tool shims; the checkout
-and container root remain read-only. The CI workflow uses this same pinned
-image and performs no host package installation.
+and container root remain read-only. CI disables container networking and
+requires the isolated M1 init startup test to run (no silent skip).
+The two signed-repository suites run in a separate arm64 CI job using the
+existing pinned Arch base: Debian's older `repo-add` cannot exercise the
+production signature format. Neither job installs host packages or boots a
+kernel. Seven additional source/artifact suites require a clean pinned Linux
+checkout and retained M0 artifacts; the aggregate reports this boundary.
+See [offline audit and repeat commands](docs/offline-audit-2026-09-04.md).
+The separate [bootloader source tests](docs/bootloader-source-tests-2026-09-05.md)
+exercise actual USB/NVMe C functions against process-owned memory, including
+upstream regression controls and measured function coverage. They require
+pinned candidate sources and generate U-Boot test headers in disposable storage;
+static CI does not run this source-specific tier. Candidate builds are not
+canonical M0 evidence.
 
 ## Historical Milestone 0A baseline
 

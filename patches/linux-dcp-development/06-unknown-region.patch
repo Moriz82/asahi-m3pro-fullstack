@@ -1,0 +1,29 @@
+From e7dab8ea686cf2a081cb856f1e193f624929305f Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Sat, 1 Aug 2026 23:34:22 +1000
+Subject: [PATCH] drm: apple: split out unknown 14.7 region
+
+Some of this is 0xaa padding, some of it is zeroes, and
+there is a conspicuous empty byte at the end.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb_template.h | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index c08d31b177c822..87204bc43b1e4e 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -125,7 +125,10 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ #endif
+ 	u8 padding[1];
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+-	u8 padding_14_7[0x234];
++	u8 padding_14_7[0x1e9];
++	u8 unk_14_7_zero[0x46];
++	u32 unk_14_7_u32;
++	u8 unk_bool;
+ #endif
+ } __packed;
+ 

@@ -1,0 +1,964 @@
+diff --git a/src/afk.c b/src/afk.c
+index 5be056c..de9502a 100644
+--- a/src/afk.c
++++ b/src/afk.c
+@@ -81,6 +81,7 @@ struct epic_cmd {
+ 
+ struct afk_epic {
+     rtkit_dev_t *rtk;
++    bool stopping;
+ 
+     afk_epic_ep_t *endpoint[0x10];
+ };
+@@ -104,6 +105,10 @@ struct afk_epic_ep {
+ 
+     bool started;
+     bool start_requested;
++    bool stopping;
++    bool shutdown_sent;
++    bool shutdown_acked;
++    unsigned active_calls;
+     u16 seq;
+     u16 command_seq;
+     /* Remains set after an uncertain completion; OOL buffers must not be reused. */
+@@ -237,6 +242,10 @@ static int afk_epic_poll(afk_epic_t *afk, int endpoint, bool block)
+     }
+ 
+     int type = FIELD_GET(RBEP_TYPE, msg.msg);
++    /* No ring access or client callback after teardown starts. Late startup,
++     * command and notification messages cannot revive a retained endpoint. */
++    if ((afk->stopping || epic->stopping) && type != RBEP_SHUTDOWN_ACK)
++        return 0;
+     u64 base, size, tag;
+     switch (type) {
+         case RBEP_INIT_ACK:
+@@ -318,6 +327,9 @@ static int afk_epic_poll(afk_epic_t *afk, int endpoint, bool block)
+             break;
+ 
+         case RBEP_SHUTDOWN_ACK:
++            if (!epic->shutdown_sent || epic->shutdown_acked)
++                return -1;
++            epic->shutdown_acked = true;
+             epic->started = false;
+             break;
+ 
+@@ -502,12 +514,21 @@ static bool afk_epic_decode(struct afk_qe *message, struct epic_sub_hdr **sub, v
+ 
+ int afk_epic_work(afk_epic_t *afk, int endpoint)
+ {
++    if (!afk || afk->stopping)
++        return -1;
+     int i = 0;
+     unsigned messages = 0;
+ 
+     /* Yield to caller deadlines even while unrelated mailbox traffic continues. */
+     while (i < 0x10) {
++        if (afk->stopping)
++            return -1;
+         afk_epic_ep_t *cur = afk->endpoint[i++];
++        if (cur && cur->stopping) {
++            if (cur->ep == endpoint)
++                return -1;
++            continue;
++        }
+         if (cur) {
+             struct afk_rb *rb = &cur->rx;
+             u32 rptr = 0, wptr = 0;
+@@ -589,8 +610,10 @@ static int afk_epic_handle_std_service(afk_epic_ep_t *epic, int channel, u8 cate
+     struct epic_sub_hdr *sub = (void *)(hdr + 1);
+     void *reply = sub + 1;
+     memcpy(reply, call, sizeof(*call));
++    epic->active_calls++;
+     int ret = service->ops->call(service, call->type, payload + sizeof(*call), call->len,
+                                 reply + sizeof(*call), call->len);
++    epic->active_calls--;
+     if (ret)
+         goto out;
+ 
+@@ -609,7 +632,7 @@ out:
+     return ret;
+ }
+ 
+-int afk_epic_command(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf, size_t txsize,
++static int afk_epic_command_inner(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf, size_t txsize,
+                      void *rxbuf, size_t *rxsize)
+ {
+     struct {
+@@ -619,7 +642,8 @@ int afk_epic_command(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf
+     } PACKED msg;
+     size_t rxmax = rxsize ? *rxsize : 0;
+ 
+-    if (!epic || !epic->afk || channel < 0 || epic->command_pending ||
++    if (!epic || !epic->afk || epic->stopping || epic->afk->stopping ||
++        channel < 0 || epic->command_pending ||
+         !epic->txbuf.bfr || !epic->rxbuf.bfr || (txsize && !txbuf) || (rxmax && !rxbuf) ||
+         txsize > epic->txbuf.sz || txsize > (u32)-1 ||
+         rxmax > epic->rxbuf.sz || rxmax > (u32)-1)
+@@ -727,6 +751,17 @@ malformed:
+     return -1;
+ }
+ 
++int afk_epic_command(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf, size_t txsize,
++                     void *rxbuf, size_t *rxsize)
++{
++    if (!epic)
++        return -1;
++    epic->active_calls++;
++    int ret = afk_epic_command_inner(epic, channel, sub_type, txbuf, txsize, rxbuf, rxsize);
++    epic->active_calls--;
++    return ret;
++}
++
+ static void afk_epic_notify_handler(afk_epic_ep_t *epic)
+ {
+     struct afk_qe *message;
+@@ -749,6 +784,10 @@ static void afk_epic_notify_handler(afk_epic_ep_t *epic)
+ afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_service_ops_t *ops,
+                                  bool notify)
+ {
++    if (!afk || afk->stopping || endpoint < 0x20 || endpoint >= 0x30 ||
++        afk->endpoint[endpoint - 0x20])
++        return NULL;
++
+     afk_epic_ep_t *epic = calloc(1, sizeof(afk_epic_ep_t));
+     if (!epic)
+         return NULL;
+@@ -756,6 +795,7 @@ afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_s
+     epic->ep = endpoint;
+     epic->afk = afk;
+     epic->ops = ops;
++    epic->active_calls = 1; /* The startup frame owns this endpoint until return. */
+     afk->endpoint[endpoint - 0x20] = epic;
+ 
+     if (notify)
+@@ -769,42 +809,65 @@ afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_s
+     struct rtkit_message msg = {endpoint, FIELD_PREP(RBEP_TYPE, RBEP_INIT)};
+     if (!rtkit_send(epic->afk->rtk, &msg)) {
+         printf("EPIC: failed to send init message\n");
+-        goto err;
++        goto err_shutdown;
+     }
+ 
++    u64 deadline = timeout_calculate(1000000);
+     while (!epic->started) {
+-        int ret = afk_epic_poll(epic->afk, endpoint, true);
++        if (timeout_expired(deadline)) {
++            printf("EPIC: endpoint startup timed out\n");
++            goto err_shutdown;
++        }
++        int ret = afk_epic_poll(epic->afk, endpoint, false);
+         if (ret < 0)
+-            break;
++            goto err_shutdown;
+         else if (ret > 0)
+             printf("EPIC: received unexpected message during init\n");
+     }
+ 
++    epic->active_calls--;
+     return epic;
+ 
++err_shutdown:
++    epic->active_calls--;
++    /* On failure the AFK owner retains this registered endpoint and buffers. */
++    afk_epic_shutdown_ep(epic);
++    return NULL;
+ err:
+     afk->endpoint[endpoint - 0x20] = NULL;
+     free(epic);
+     return NULL;
+ }
+ 
+-int afk_epic_shutdown_ep(afk_epic_ep_t *epic)
++static int afk_epic_shutdown_ep_inner(afk_epic_ep_t *epic)
+ {
+-    struct rtkit_message msg = {epic->ep, FIELD_PREP(RBEP_TYPE, RBEP_SHUTDOWN)};
+-    if (!rtkit_send(epic->afk->rtk, &msg)) {
+-        printf("EPIC: failed to send shutdown message\n");
+-        return -1;
++    epic->stopping = true;
++    if (!epic->shutdown_sent) {
++        struct rtkit_message msg = {epic->ep, FIELD_PREP(RBEP_TYPE, RBEP_SHUTDOWN)};
++        if (!rtkit_send(epic->afk->rtk, &msg)) {
++            printf("EPIC: failed to send shutdown message\n");
++            return -1;
++        }
++        epic->shutdown_sent = true;
+     }
+ 
+-    while (epic->started) {
+-        int ret = afk_epic_poll(epic->afk, epic->ep, true);
++    u64 deadline = timeout_calculate(1000000);
++    while (!epic->shutdown_acked) {
++        if (timeout_expired(deadline)) {
++            printf("EPIC: shutdown timed out; retaining endpoint and buffers\n");
++            return -1;
++        }
++        int ret = afk_epic_poll(epic->afk, epic->ep, false);
+         if (ret < 0)
+-            break;
++            return -1;
+     }
+ 
+-    rtkit_free_buffer(epic->afk->rtk, &epic->buf);
+-    rtkit_free_buffer(epic->afk->rtk, &epic->rxbuf);
+-    rtkit_free_buffer(epic->afk->rtk, &epic->txbuf);
++    /* Only the matching endpoint shutdown ACK releases firmware ownership.
++     * A failed unmap retains the endpoint for cleanup, without another request. */
++    if (!rtkit_free_buffer(epic->afk->rtk, &epic->buf) ||
++        !rtkit_free_buffer(epic->afk->rtk, &epic->rxbuf) ||
++        !rtkit_free_buffer(epic->afk->rtk, &epic->txbuf))
++        return -1;
+ 
+     epic->afk->endpoint[epic->ep - 0x20] = NULL;
+ 
+@@ -812,6 +875,20 @@ int afk_epic_shutdown_ep(afk_epic_ep_t *epic)
+     return 0;
+ }
+ 
++int afk_epic_shutdown_ep(afk_epic_ep_t *epic)
++{
++    if (!epic)
++        return 0;
++    if (epic->active_calls)
++        return -1;
++    /* Also protect this shutdown frame from another endpoint's callback. */
++    epic->active_calls++;
++    int ret = afk_epic_shutdown_ep_inner(epic);
++    if (ret)
++        epic->active_calls--;
++    return ret; /* On success epic was freed; do not touch it again. */
++}
++
+ static const afk_epic_service_ops_t *afk_match_service(afk_epic_ep_t *ep, const char *name)
+ {
+     const afk_epic_service_ops_t *ops;
+@@ -831,10 +908,11 @@ static const afk_epic_service_ops_t *afk_match_service(afk_epic_ep_t *ep, const
+     return NULL;
+ }
+ 
+-int afk_epic_start_interface(afk_epic_ep_t *epic, void *intf, int expected, size_t txsize,
++static int afk_epic_start_interface_inner(afk_epic_ep_t *epic, void *intf, int expected, size_t txsize,
+                              size_t rxsize)
+ {
+-    if (!epic || expected <= 0 || epic->num_channels > AFK_MAX_CHANNEL ||
++    if (!epic || !epic->afk || epic->stopping || epic->afk->stopping ||
++        expected <= 0 || epic->num_channels > AFK_MAX_CHANNEL ||
+         (u32)expected > AFK_MAX_CHANNEL - epic->num_channels || !txsize || !rxsize ||
+         txsize > (u32)-1 || rxsize > (u32)-1 || epic->txbuf.bfr || epic->rxbuf.bfr)
+         return -1;
+@@ -901,7 +979,9 @@ int afk_epic_start_interface(afk_epic_ep_t *epic, void *intf, int expected, size
+         afk_epic_service_t *service = &epic->services[epic->num_channels++];
+         *service = (afk_epic_service_t){.enabled = true, .ops = ops, .intf = intf,
+                                       .epic = epic, .channel = message->channel};
++        epic->active_calls++;
+         ops->init(service, epic_name, service_name, epic_unit);
++        epic->active_calls--;
+         services++;
+ next:
+         free(epic_name);
+@@ -911,6 +991,8 @@ next:
+             break;
+     }
+ 
++    if (epic->stopping || epic->afk->stopping)
++        return -1;
+     if (services != expected) {
+         printf("AFK[ep:%02x]: incomplete service discovery\n", epic->ep);
+         return -1;
+@@ -925,6 +1007,17 @@ next:
+     return 0;
+ }
+ 
++int afk_epic_start_interface(afk_epic_ep_t *epic, void *intf, int expected, size_t txsize,
++                             size_t rxsize)
++{
++    if (!epic)
++        return -1;
++    epic->active_calls++;
++    int ret = afk_epic_start_interface_inner(epic, intf, expected, txsize, rxsize);
++    epic->active_calls--;
++    return ret;
++}
++
+ afk_epic_t *afk_epic_init(rtkit_dev_t *rtkit)
+ {
+     afk_epic_t *afk = calloc(sizeof(*afk), 1);
+@@ -939,10 +1032,12 @@ afk_epic_t *afk_epic_init(rtkit_dev_t *rtkit)
+ 
+ int afk_epic_shutdown(afk_epic_t *afk)
+ {
+-
++    if (!afk)
++        return 0;
++    afk->stopping = true;
+     for (int i = 0; i < 0x10; i++)
+-        if (afk->endpoint[i])
+-            afk_epic_shutdown_ep(afk->endpoint[i]);
++        if (afk->endpoint[i] && afk_epic_shutdown_ep(afk->endpoint[i]))
++            return -1;
+ 
+     free(afk);
+ 
+diff --git a/src/afk.h b/src/afk.h
+index 83fb8e6..c4665e7 100644
+--- a/src/afk.h
++++ b/src/afk.h
+@@ -36,6 +36,9 @@ typedef struct afk_epic_service_ops {
+ } afk_epic_service_ops_t;
+ 
+ afk_epic_t *afk_epic_init(rtkit_dev_t *rtkit);
++/* Shutdown failure retains the owner and all not-yet-released resources.
++ * Retry waits for the same published request; it does not issue a new one.
++ * No commands or callbacks are permitted once shutdown has started. */
+ int afk_epic_shutdown(afk_epic_t *afk);
+ 
+ afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_service_ops_t *ops,
+diff --git a/src/rtkit.c b/src/rtkit.c
+index fb9fb07..031bfab 100644
+--- a/src/rtkit.c
++++ b/src/rtkit.c
+@@ -177,13 +177,17 @@ out_free_rtk:
+     return NULL;
+ }
+ 
+-void rtkit_free(rtkit_dev_t *rtk)
++bool rtkit_free(rtkit_dev_t *rtk)
+ {
+-    rtkit_free_buffer(rtk, &rtk->syslog_bfr);
+-    rtkit_free_buffer(rtk, &rtk->crashlog_bfr);
+-    rtkit_free_buffer(rtk, &rtk->ioreport_bfr);
++    if (!rtk)
++        return true;
++    if (!rtkit_free_buffer(rtk, &rtk->syslog_bfr) ||
++        !rtkit_free_buffer(rtk, &rtk->crashlog_bfr) ||
++        !rtkit_free_buffer(rtk, &rtk->ioreport_bfr))
++        return false;
+     free(rtk->name);
+     free(rtk);
++    return true;
+ }
+ 
+ bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg)
+diff --git a/src/rtkit.h b/src/rtkit.h
+index 18fcc4b..59eb99a 100644
+--- a/src/rtkit.h
++++ b/src/rtkit.h
+@@ -32,7 +32,8 @@ rtkit_dev_t *rtkit_init(const char *name, asc_dev_t *asc, dart_dev_t *dart,
+  * after independently establishing a safe reset; a late ACK cannot authorize retry. */
+ bool rtkit_quiesce(rtkit_dev_t *rtk);
+ bool rtkit_sleep(rtkit_dev_t *rtk);
+-void rtkit_free(rtkit_dev_t *rtk);
++/* Requires independent quiescence proof. False retains this owner for cleanup. */
++bool rtkit_free(rtkit_dev_t *rtk);
+ 
+ bool rtkit_start_ep(rtkit_dev_t *rtk, u8 ep);
+ bool rtkit_boot(rtkit_dev_t *rtk);
+diff --git a/src/dcp.c b/src/dcp.c
+index 5a482ff..6fa5954 100644
+--- a/src/dcp.c
++++ b/src/dcp.c
+@@ -5,6 +5,7 @@
+ #include "adt.h"
+ #include "afk.h"
+ #include "dcp.h"
++#include "dcp_iboot.h"
+ #include "firmware.h"
+ #include "malloc.h"
+ #include "pmgr.h"
+@@ -24,6 +25,8 @@ struct adt_function_smc_gpio {
+ 
+ static char dcp_pmgr_dev[16] = "DISP0_CPU0";
+ static u32 dcp_die;
++/* The display stack owns one DCP. Keep failed initialization reachable too. */
++static dcp_dev_t *active_dcp;
+ 
+ static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
+ {
+@@ -63,26 +66,20 @@ static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
+         return -1;
+     }
+ 
+-    dcp->dpav_ep = dcp_dpav_init(dcp);
+-    if (!dcp->dpav_ep) {
++    if (!dcp_dpav_init(dcp)) {
+         printf("dcp: failed to initialize dpav endpoint\n");
+         return -1;
+     }
+ 
+-    dcp->dptx_ep = dcp_dptx_init(dcp, cfg->num_dptxports);
+-    if (!dcp->dptx_ep) {
++    if (!dcp_dptx_init(dcp, cfg->num_dptxports)) {
+         printf("dcp: failed to initialize dptx-port endpoint\n");
+-        dcp_dpav_shutdown(dcp->dpav_ep);
+         return -1;
+     }
+ 
+ #ifdef RTKIT_SYSLOG
+     // start system endpoint when extended logging is requested
+-    dcp->system_ep = dcp_system_init(dcp);
+-    if (!dcp->system_ep) {
++    if (!dcp_system_init(dcp)) {
+         printf("dcp: failed to initialize system endpoint\n");
+-        dcp_dptx_shutdown(dcp->dptx_ep);
+-        dcp_dpav_shutdown(dcp->dpav_ep);
+         return -1;
+     }
+ 
+@@ -94,6 +91,8 @@ static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
+ 
+ int dcp_connect_dptx(dcp_dev_t *dcp)
+ {
++    if (!dcp || dcp->stopping)
++        return -1;
+     if (dcp->dptx_ep && dcp->phy) {
+         return dcp_dptx_connect(dcp->dptx_ep, dcp->phy, dcp->die, 0);
+     }
+@@ -103,6 +102,8 @@ int dcp_connect_dptx(dcp_dev_t *dcp)
+ 
+ int dcp_work(dcp_dev_t *dcp)
+ {
++    if (!dcp || dcp->stopping)
++        return -1;
+     return afk_epic_work(dcp->afk, -1);
+ }
+ 
+@@ -148,6 +149,11 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+ {
+     u32 sid;
+ 
++    if (active_dcp) {
++        printf("dcp: previous owner has not completed shutdown\n");
++        return NULL;
++    }
++
+     if (!cfg || !cfg->pmgr_dev[0] ||
+         strnlen(cfg->pmgr_dev, sizeof(cfg->pmgr_dev)) >= sizeof(dcp_pmgr_dev)) {
+         printf("dcp: invalid display configuration\n");
+@@ -182,6 +188,7 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+     dcp_dev_t *dcp = calloc(1, sizeof(dcp_dev_t));
+     if (!dcp)
+         return NULL;
++    active_dcp = dcp;
+ 
+     dcp->dart_dcp = dart_init_adt(cfg->dcp_dart, 0, sid, true);
+     if (!dcp->dart_dcp) {
+@@ -204,6 +211,8 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+         goto out_dart_disp;
+ 
+     dcp->iovad_dcp = iovad_init(vm_base + 0x10000000, vm_base + 0x20000000);
++    if (!dcp->iovad_dcp)
++        goto out_dart_disp;
+ 
+     int ret = dcp_create_firmware_mappings(cfg, dcp);
+     if (ret < 0) {
+@@ -211,7 +220,10 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+         goto out_iovad;
+     }
+     if (ret > 0) {
+-        pmgr_reset(dcp_die, dcp_pmgr_dev);
++        if (pmgr_reset(dcp_die, dcp_pmgr_dev)) {
++            dcp->reset_failed = true;
++            goto out_iovad;
++        }
+     }
+ 
+     dcp->asc = asc_init(cfg->dcp);
+@@ -246,39 +258,60 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+     return dcp;
+ 
+ out_afk:
+-    afk_epic_shutdown(dcp->afk);
+ out_rtkit:
+-    rtkit_quiesce(dcp->rtkit);
+-    rtkit_free(dcp->rtkit);
+ out_iovad:
+-    iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
+ out_dart_disp:
+-    dart_shutdown(dcp->dart_disp);
+ out_dart_dcp:
+-    dart_shutdown(dcp->dart_dcp);
+ out_free:
+-    free(dcp);
++    if (dcp_shutdown(dcp, false))
++        printf("dcp: retaining failed initialization; handoff must remain blocked\n");
+     return NULL;
+ }
+ 
+ int dcp_shutdown(dcp_dev_t *dcp, bool sleep)
+ {
++    if (!dcp)
++        dcp = active_dcp;
++    if (!dcp)
++        return 0;
++    if (dcp != active_dcp || dcp->reset_failed)
++        return -1;
++    dcp->stopping = true;
++
+     /* dcp/dcp0 on desktop M2 and M2 Pro/Max devices do not wake from sleep */
+-    dcp_system_shutdown(dcp->system_ep);
+-    dcp_dptx_shutdown(dcp->dptx_ep);
+-    dcp_dpav_shutdown(dcp->dpav_ep);
+-    free(dcp->phy);
+-    afk_epic_shutdown(dcp->afk);
+-    if (sleep) {
+-        rtkit_sleep(dcp->rtkit);
+-        pmgr_reset(dcp_die, dcp_pmgr_dev);
+-    } else {
+-        rtkit_quiesce(dcp->rtkit);
++    if (dcp_ib_shutdown(dcp->iboot_ep) || dcp_system_shutdown(dcp->system_ep) ||
++        dcp_dptx_shutdown(dcp->dptx_ep) || dcp_dpav_shutdown(dcp->dpav_ep))
++        return -1;
++    if (afk_epic_shutdown(dcp->afk))
++        return -1;
++    dcp->afk = NULL;
++
++    /* Retained DART state may already be in use by firmware. Without an RTKit
++     * owner we cannot establish quiescence, including early init failures. */
++    if (!dcp->rtkit && (dcp->dart_dcp || dcp->dart_disp))
++        return -1;
++    if (dcp->rtkit && !dcp->quiesced) {
++        if (!(sleep ? rtkit_sleep(dcp->rtkit) : rtkit_quiesce(dcp->rtkit)))
++            return -1;
++        dcp->quiesced = true;
++        if (sleep && pmgr_reset(dcp_die, dcp_pmgr_dev)) {
++            dcp->reset_failed = true;
++            return -1;
++        }
+     }
+-    rtkit_free(dcp->rtkit);
+-    dart_shutdown(dcp->dart_disp);
+-    iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
+-    dart_shutdown(dcp->dart_dcp);
++    if (!rtkit_free(dcp->rtkit))
++        return -1;
++    dcp->rtkit = NULL;
++    if (dcp->dart_disp)
++        dart_shutdown(dcp->dart_disp);
++    if (dcp->iovad_dcp)
++        iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
++    if (dcp->dart_dcp)
++        dart_shutdown(dcp->dart_dcp);
++    if (dcp->asc)
++        asc_free(dcp->asc);
++    free(dcp->phy);
++    active_dcp = NULL;
+     free(dcp);
+ 
+     return 0;
+diff --git a/src/dcp.h b/src/dcp.h
+index 8a7ef70..bc290af 100644
+--- a/src/dcp.h
++++ b/src/dcp.h
+@@ -32,6 +32,7 @@ typedef struct dcp_dev {
+     asc_dev_t *asc;
+     rtkit_dev_t *rtkit;
+     afk_epic_t *afk;
++    struct dcp_iboot_if *iboot_ep;
+     dcp_system_if_t *system_ep;
+     dcp_dpav_if_t *dpav_ep;
+     dcp_dptx_if_t *dptx_ep;
+@@ -39,6 +40,9 @@ typedef struct dcp_dev {
+     u32 die;
+     u32 dp2hdmi_pwr_gpio;
+     u32 hdmi_pwr_gpio;
++    bool stopping;
++    bool quiesced;
++    bool reset_failed;
+ } dcp_dev_t;
+ 
+ int dcp_connect_dptx(dcp_dev_t *dcp);
+@@ -47,5 +51,7 @@ int dcp_work(dcp_dev_t *dcp);
+ dcp_dev_t *dcp_init(const display_config_t *config);
+ 
+ int dcp_shutdown(dcp_dev_t *dcp, bool sleep);
++/* NULL also checks/cleans up a retained failed initialization. Nonzero retains
++ * the owner and must prevent another initialization or next-stage handoff. */
+ 
+ #endif
+diff --git a/src/dcp_iboot.c b/src/dcp_iboot.c
+index f5ec4e1..8b0e8de 100644
+--- a/src/dcp_iboot.c
++++ b/src/dcp_iboot.c
+@@ -127,11 +127,14 @@ static const afk_epic_service_ops_t iboot_service_ops[] = {
+ 
+ dcp_iboot_if_t *dcp_ib_init(dcp_dev_t *dcp)
+ {
++    if (!dcp || dcp->stopping || dcp->iboot_ep)
++        return NULL;
+     dcp_iboot_if_t *iboot = calloc(1, sizeof(dcp_iboot_if_t));
+     if (!iboot)
+         return NULL;
+ 
+     iboot->dcp = dcp;
++    dcp->iboot_ep = iboot;
+     iboot->epic = afk_epic_start_ep(dcp->afk, DCP_IBOOT_ENDPOINT, iboot_service_ops, false);
+     if (!iboot->epic) {
+         printf("dcp-iboot: failed to initialize EPIC\n");
+@@ -149,15 +152,21 @@ dcp_iboot_if_t *dcp_ib_init(dcp_dev_t *dcp)
+     return iboot;
+ 
+ err_shutdown:
+-    afk_epic_shutdown_ep(iboot->epic);
++    if (afk_epic_shutdown_ep(iboot->epic))
++        return NULL; /* The DCP owner retains this partially initialized client. */
+ err_free:
++    dcp->iboot_ep = NULL;
+     free(iboot);
+     return NULL;
+ }
+ 
+ int dcp_ib_shutdown(dcp_iboot_if_t *iboot)
+ {
+-    afk_epic_shutdown_ep(iboot->epic);
++    if (!iboot)
++        return 0;
++    if (afk_epic_shutdown_ep(iboot->epic))
++        return -1;
++    iboot->dcp->iboot_ep = NULL;
+ 
+     free(iboot);
+     return 0;
+diff --git a/src/dcp/dpav_ep.c b/src/dcp/dpav_ep.c
+index 292941e..3d413b6 100644
+--- a/src/dcp/dpav_ep.c
++++ b/src/dcp/dpav_ep.c
+@@ -44,11 +44,14 @@ static const afk_epic_service_ops_t dcp_dpav_ops[] = {
+ 
+ dcp_dpav_if_t *dcp_dpav_init(dcp_dev_t *dcp)
+ {
++    if (!dcp || dcp->stopping || dcp->dpav_ep)
++        return NULL;
+     dcp_dpav_if_t *dpav = calloc(1, sizeof(dcp_dpav_if_t));
+     if (!dpav)
+         return NULL;
+ 
+     dpav->dcp = dcp;
++    dcp->dpav_ep = dpav;
+     dpav->epic = afk_epic_start_ep(dcp->afk, DCP_DPAV_ENDPOINT, dcp_dpav_ops, true);
+     if (!dpav->epic) {
+         printf("dpav: failed to initialize EPIC\n");
+@@ -65,8 +68,10 @@ dcp_dpav_if_t *dcp_dpav_init(dcp_dev_t *dcp)
+     return dpav;
+ 
+ err_shutdown:
+-    afk_epic_shutdown_ep(dpav->epic);
++    if (afk_epic_shutdown_ep(dpav->epic))
++        return NULL; /* The DCP owner retains this partially initialized client. */
+ err_free:
++    dcp->dpav_ep = NULL;
+     free(dpav);
+     return NULL;
+ }
+@@ -74,7 +79,9 @@ err_free:
+ int dcp_dpav_shutdown(dcp_dpav_if_t *dpav)
+ {
+     if (dpav) {
+-        afk_epic_shutdown_ep(dpav->epic);
++        if (afk_epic_shutdown_ep(dpav->epic))
++            return -1;
++        dpav->dcp->dpav_ep = NULL;
+         free(dpav);
+     }
+     return 0;
+diff --git a/src/dcp/system_ep.c b/src/dcp/system_ep.c
+index 16aac88..cfef491 100644
+--- a/src/dcp/system_ep.c
++++ b/src/dcp/system_ep.c
+@@ -112,11 +112,14 @@ static const afk_epic_service_ops_t dcp_system_ops[] = {
+ 
+ dcp_system_if_t *dcp_system_init(dcp_dev_t *dcp)
+ {
++    if (!dcp || dcp->stopping || dcp->system_ep)
++        return NULL;
+     dcp_system_if_t *system = calloc(1, sizeof(dcp_system_if_t));
+     if (!system)
+         return NULL;
+ 
+     system->dcp = dcp;
++    dcp->system_ep = system;
+     system->epic = afk_epic_start_ep(dcp->afk, DCP_SYSTEM_ENDPOINT, dcp_system_ops, true);
+     if (!system->epic) {
+         // printf("system: failed to initialize EPIC\n");
+@@ -134,8 +137,10 @@ dcp_system_if_t *dcp_system_init(dcp_dev_t *dcp)
+     return system;
+ 
+ err_shutdown:
+-    afk_epic_shutdown_ep(system->epic);
++    if (afk_epic_shutdown_ep(system->epic))
++        return NULL; /* The DCP owner retains this partially initialized client. */
+ err_free:
++    dcp->system_ep = NULL;
+     free(system);
+     return NULL;
+ }
+@@ -143,7 +148,9 @@ err_free:
+ int dcp_system_shutdown(dcp_system_if_t *system)
+ {
+     if (system) {
+-        afk_epic_shutdown_ep(system->epic);
++        if (afk_epic_shutdown_ep(system->epic))
++            return -1;
++        system->dcp->system_ep = NULL;
+         free(system);
+     }
+     return 0;
+diff --git a/src/dcp/dptx_port_ep.c b/src/dcp/dptx_port_ep.c
+index 1b52ddb..42b6e14 100644
+--- a/src/dcp/dptx_port_ep.c
++++ b/src/dcp/dptx_port_ep.c
+@@ -547,11 +547,14 @@ int dcp_dptx_disconnect(dcp_dptx_if_t *dptx, u32 port)
+ 
+ dcp_dptx_if_t *dcp_dptx_init(dcp_dev_t *dcp, u32 num_dptxports)
+ {
++    if (!dcp || dcp->stopping || dcp->dptx_ep)
++        return NULL;
+     dcp_dptx_if_t *dptx = calloc(1, sizeof(dcp_dptx_if_t));
+     if (!dptx)
+         return NULL;
+ 
+     dptx->dcp = dcp;
++    dcp->dptx_ep = dptx;
+     dptx->epic = afk_epic_start_ep(dcp->afk, DCP_DPTX_PORT_ENDPOINT, dcp_dptx_ops, true);
+     if (!dptx->epic) {
+         printf("dcp-dptx: failed to initialize EPIC\n");
+@@ -567,8 +570,10 @@ dcp_dptx_if_t *dcp_dptx_init(dcp_dev_t *dcp, u32 num_dptxports)
+     return dptx;
+ 
+ err_shutdown:
+-    afk_epic_shutdown_ep(dptx->epic);
++    if (afk_epic_shutdown_ep(dptx->epic))
++        return NULL; /* The DCP owner retains this partially initialized client. */
+ err_free:
++    dcp->dptx_ep = NULL;
+     free(dptx);
+     return NULL;
+ }
+@@ -576,7 +581,9 @@ err_free:
+ int dcp_dptx_shutdown(dcp_dptx_if_t *dptx)
+ {
+     if (dptx) {
+-        afk_epic_shutdown_ep(dptx->epic);
++        if (afk_epic_shutdown_ep(dptx->epic))
++            return -1;
++        dptx->dcp->dptx_ep = NULL;
+         free(dptx);
+     }
+     return 0;
+diff --git a/src/display.c b/src/display.c
+index e50b0d0..e034b27 100644
+--- a/src/display.c
++++ b/src/display.c
+@@ -274,6 +274,8 @@ const display_config_t *display_get_config(void)
+ 
+ int display_start_dcp(void)
+ {
++    if (dcp && (dcp->stopping || !iboot))
++        return -1;
+     if (iboot)
+         return 0;
+ 
+@@ -315,14 +317,16 @@ int display_start_dcp(void)
+     if (DART_IS_ERR(fb_dva)) {
+         printf("display: failed to find display DVA\n");
+         fb_dva = 0;
+-        dcp_shutdown(dcp, false);
++        if (!dcp_shutdown(dcp, false))
++            dcp = NULL;
+         return -1;
+     }
+ 
+     iboot = dcp_ib_init(dcp);
+     if (!iboot) {
+         printf("display: failed to initialize DCP iBoot interface\n");
+-        dcp_shutdown(dcp, false);
++        if (!dcp_shutdown(dcp, false))
++            dcp = NULL;
+         return -1;
+     }
+ 
+@@ -677,31 +681,18 @@ int display_init(void)
+     }
+ }
+ 
+-void display_shutdown(dcp_shutdown_mode mode)
++int display_shutdown(dcp_shutdown_mode mode)
+ {
+-    /* We have no DCP, so just exit */
+-    if (!has_dcp)
+-        return;
+-
+-    if (iboot) {
+-        dcp_ib_shutdown(iboot);
+-        switch (mode) {
+-            case DCP_QUIESCED:
+-                printf("display: Quiescing DCP (unconditional)\n");
+-                dcp_shutdown(dcp, false);
+-                break;
+-            case DCP_SLEEP_IF_EXTERNAL:
+-                if (!display_is_external)
+-                    printf("display: Quiescing DCP (internal)\n");
+-                else
+-                    printf("display: Sleeping DCP (external)\n");
+-                dcp_shutdown(dcp, display_is_external);
+-                break;
+-            case DCP_SLEEP:
+-                printf("display: Sleeping DCP (unconditional)\n");
+-                dcp_shutdown(dcp, true);
+-                break;
+-        }
+-        iboot = NULL;
++    if (mode != DCP_QUIESCED && mode != DCP_SLEEP_IF_EXTERNAL && mode != DCP_SLEEP)
++        return -1;
++    bool sleep = mode == DCP_SLEEP || (mode == DCP_SLEEP_IF_EXTERNAL && display_is_external);
++    /* DCP owns the client, including partially initialized clients. Drop only
++     * this alias before cleanup, which may free the client but retain DCP. */
++    iboot = NULL;
++    if (dcp_shutdown(dcp, sleep)) {
++        printf("display: shutdown incomplete; retaining DCP, handoff blocked\n");
++        return -1;
+     }
++    dcp = NULL;
++    return 0;
+ }
+diff --git a/src/display.h b/src/display.h
+index b1ab9d3..46b276c 100644
+--- a/src/display.h
++++ b/src/display.h
+@@ -17,7 +17,7 @@ extern bool display_is_external;
+ int display_init(void);
+ int display_start_dcp(void);
+ int display_configure(const char *config);
+-void display_shutdown(dcp_shutdown_mode mode);
++int display_shutdown(dcp_shutdown_mode mode);
+ const display_config_t *display_get_config(void);
+ 
+ #endif
+diff --git a/src/main.c b/src/main.c
+index d4e828c..d5b4716 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -168,7 +168,8 @@ void m1n1_main(void)
+     display_init();
+     // Kick DCP to sleep, so dodgy monitors which cause reconnect cycles don't cause us to lose the
+     // framebuffer.
+-    display_shutdown(DCP_SLEEP_IF_EXTERNAL);
++    if (display_shutdown(DCP_SLEEP_IF_EXTERNAL))
++        printf("display: shutdown failed; next-stage handoff remains blocked\n");
+     // On idevice we need to always clear, because otherwise it looks scuffed on white devices
+     fb_init(!is_mac);
+     fb_display_logo();
+@@ -193,11 +194,19 @@ void m1n1_main(void)
+ 
+     printf("Preparing to run next stage at %p...\n", next_stage.entry);
+ 
++#ifndef BRINGUP
++    /* Keep debug transports and exception handling alive if DCP is not safe
++     * to hand over. Do not automatically reboot or tear down more owners. */
++    while (display_shutdown(DCP_SLEEP_IF_EXTERNAL) || !next_stage.entry) {
++        printf("Shutdown incomplete or no next stage. Remaining in proxy; no handoff.\n");
++        uartproxy_run(NULL);
++    }
++#endif
++
+     nvme_shutdown();
+     exception_shutdown();
+ #ifndef BRINGUP
+     usb_iodev_shutdown();
+-    display_shutdown(DCP_SLEEP_IF_EXTERNAL);
+ #ifdef USE_FB
+     fb_shutdown(next_stage.restore_logo);
+ #endif
+diff --git a/src/hv.c b/src/hv.c
+index ef424f8..bdad50b 100644
+--- a/src/hv.c
++++ b/src/hv.c
+@@ -52,13 +52,17 @@ struct hv_secondary_info_t {
+ };
+ 
+ static struct hv_secondary_info_t hv_secondary_info;
++static bool hv_initialized;
+ 
+-void hv_init(void)
++int hv_init(void)
+ {
+-    pcie_shutdown();
++    hv_initialized = false;
+     // Make sure we wake up DCP if we put it to sleep, just quiesce it to match ADT
+-    if (display_is_external && display_start_dcp() >= 0)
+-        display_shutdown(DCP_QUIESCED);
++    if (display_is_external && display_start_dcp() < 0)
++        return -1;
++    if (display_shutdown(DCP_QUIESCED))
++        return -1;
++    pcie_shutdown();
+     // reenable hpm interrupts for the guest for unused iodevs
+     usb_hpm_restore_irqs(0);
+     smp_start_secondaries();
+@@ -105,6 +109,8 @@ void hv_init(void)
+     sysop("tlbi alle1is");
+     sysop("dsb ish");
+     sysop("isb");
++    hv_initialized = true;
++    return 0;
+ }
+ 
+ static void hv_set_gxf_vbar(void)
+@@ -114,6 +120,10 @@ static void hv_set_gxf_vbar(void)
+ 
+ void hv_start(void *entry, u64 regs[4])
+ {
++    if (!hv_initialized) {
++        printf("HV: initialization did not complete; refusing guest entry\n");
++        return;
++    }
+     if (boot_cpu_idx == -1) {
+         printf("Boot CPU has not been found, can't start hypervisor\n");
+         return;
+@@ -256,6 +266,8 @@ static void hv_enter_secondary(void *entry, u64 regs[4])
+ 
+ void hv_start_secondary(int cpu, void *entry, u64 regs[4])
+ {
++    if (!hv_initialized)
++        return;
+     printf("HV: Initializing secondary %d\n", cpu);
+     iodev_console_flush();
+ 
+diff --git a/src/hv.h b/src/hv.h
+index 235585d..fd5430c 100644
+--- a/src/hv.h
++++ b/src/hv.h
+@@ -111,7 +111,7 @@ u64 hv_get_afsr1(void);
+ void hv_set_elr(u64 val);
+ 
+ /* HV main */
+-void hv_init(void);
++int hv_init(void);
+ void hv_start(void *entry, u64 regs[4]);
+ void hv_start_secondary(int cpu, void *entry, u64 regs[4]);
+ void hv_exit_cpu(int cpu);
+diff --git a/src/proxy.c b/src/proxy.c
+index 421064d..6031810 100644
+--- a/src/proxy.c
++++ b/src/proxy.c
+@@ -490,7 +490,7 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+             break;
+ 
+         case P_HV_INIT:
+-            hv_init();
++            reply->retval = hv_init();
+             break;
+         case P_HV_MAP:
+             hv_map(request->args[0], request->args[1], request->args[2], request->args[3]);
+@@ -607,10 +607,10 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+             reply->retval = display_configure((char *)request->args[0]);
+             break;
+         case P_DISPLAY_SHUTDOWN:
+-            display_shutdown(request->args[0]);
++            reply->retval = display_shutdown(request->args[0]);
+             break;
+         case P_DISPLAY_START_DCP:
+-            display_start_dcp();
++            reply->retval = display_start_dcp();
+             break;
+         case P_DISPLAY_IS_EXTERNAL:
+             reply->retval = display_is_external;

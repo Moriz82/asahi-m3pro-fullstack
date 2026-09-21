@@ -5,8 +5,19 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/config/milestones.env"
 source "$project_root/scripts/lib/evidence.sh"
 source "$project_root/scripts/lib/milestone0-components.sh"
-[[ $# -eq 2 && $1 == --bundle ]] || { printf 'usage: %s --bundle ABS\n' "$0" >&2; exit 64; }
-root=$2
+usage() { printf 'usage: %s --bundle ABS [M1: --expected-target-identity-sha256 HEX --target-readiness-anchors ABS]\n' "$0" >&2; exit 64; }
+root='' expected_target='' anchors_file=''
+while (($#)); do
+    [[ $# -ge 2 ]] || usage
+    case $1 in
+        --bundle) [[ -z $root ]] || usage; root=$2;;
+        --expected-target-identity-sha256) [[ -z $expected_target ]] || usage; expected_target=$2;;
+        --target-readiness-anchors) [[ -z $anchors_file ]] || usage; anchors_file=$2;;
+        *) usage;;
+    esac
+    shift 2
+done
+[[ -n $root ]] || usage
 evidence_abs_dir "$root"
 evidence_path_under "$root" "$MILESTONE_HANDOFF_ROOT"
 for file in manifest.txt inventory.tsv SHA256SUMS; do evidence_abs_regular "$root/$file"; done
@@ -14,6 +25,12 @@ while IFS= read -r -d '' entry; do evidence_die "handoff symlink member: $entry"
 while IFS= read -r -d '' entry; do evidence_die "non-regular handoff member: $entry"; done < <(find -P "$root" ! -type f ! -type d ! -type l -print0)
 [[ $(evidence_kv "$root/manifest.txt" format) == 1 ]] || evidence_die 'invalid handoff format'
 milestone=$(evidence_kv "$root/manifest.txt" milestone); [[ $milestone =~ ^M[0-8]$ ]] || evidence_die 'invalid handoff milestone'
+if [[ $milestone == M1 ]]; then
+    [[ $expected_target =~ ^[0-9a-f]{64}$ && $anchors_file == /* ]] || usage
+    evidence_abs_regular "$anchors_file"
+else
+    [[ -z $expected_target$anchors_file ]] || usage
+fi
 for key in target_model target_board target_soc source_kind evidence_valid tooling_valid hardware_acceptance native_readiness backup_recovery dfu dedicated_hardware source_inventory_sha256 source_inventory_records verifier; do evidence_kv "$root/manifest.txt" "$key" >/dev/null; done
 [[ $(evidence_kv "$root/manifest.txt" target_model) == Mac15,6 && $(evidence_kv "$root/manifest.txt" target_board) == J514s && $(evidence_kv "$root/manifest.txt" target_soc) == T6030 ]] || evidence_die 'handoff target mismatch'
 [[ $(evidence_kv "$root/manifest.txt" evidence_valid) == true && $(evidence_kv "$root/manifest.txt" tooling_valid) == true ]] || evidence_die 'handoff evidence/tooling is not valid'
@@ -82,7 +99,7 @@ case $milestone in
     M1)
         [[ $(evidence_kv "$root/manifest.txt" source_kind) == m1-checksummed-session ]] || evidence_die 'M1 source kind mismatch'
         [[ $(evidence_kv "$root/manifest.txt" verifier) == verify-milestone1-session.sh ]] || evidence_die 'M1 verifier mismatch'
-        "$project_root/scripts/verify-milestone1-session.sh" "$root/source/session" >/dev/null
+        "$project_root/scripts/verify-milestone1-session.sh" "$root/source/session" "$expected_target" "$anchors_file" >/dev/null
         ;;
     M2)
         [[ $(evidence_kv "$root/manifest.txt" verifier) == verify-m2-core-power.sh ]] || evidence_die 'M2 verifier mismatch'

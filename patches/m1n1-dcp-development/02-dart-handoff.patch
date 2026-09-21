@@ -1,0 +1,38 @@
+Subject: [DEVELOPMENT PATCH] dart: poll the command register and scan every PTE
+
+T8110 invalidation used the operation bit mask as a register offset instead
+of polling the command register written immediately before it. Also include
+the final entry in each 16 KiB page table when searching retained mappings.
+Both defects reproduce against the pinned source in an offline AArch64 C
+harness; the correction passes 584 owned-memory/mock-MMIO cases.
+
+Applies to src/dart.c shared by 60e53e7 and the local 940439b candidate.
+No native validation. Not selected by any canonical or boot builder.
+
+--- a/src/dart.c
++++ b/src/dart.c
+@@ -141,7 +141,7 @@ static void dart_t8110_tlb_invalidate(dart_dev_t *dart)
+             FIELD_PREP(DART_T8110_TLB_CMD_OP, DART_T8110_TLB_CMD_OP_FLUSH_SID) |
+                 FIELD_PREP(DART_T8110_TLB_CMD_STREAM, dart->device));
+ 
+-    if (poll32(dart->regs + DART_T8110_TLB_CMD_OP, DART_T8110_TLB_CMD_BUSY, 0, 100))
++    if (poll32(dart->regs + DART_T8110_TLB_CMD, DART_T8110_TLB_CMD_BUSY, 0, 100))
+         printf("dart: DART_T8110_TLB_CMD_BUSY did not clear.\n");
+ }
+ 
+@@ -681,13 +681,13 @@ u64 dart_search(dart_dev_t *dart, void *paddr)
+     for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr) {
+         if (!dart->l1[ttbr])
+             continue;
+-        for (u32 l1_index = 0; l1_index < 0x7ff; l1_index++) {
++        for (u32 l1_index = 0; l1_index < SZ_16K / sizeof(u64); l1_index++) {
+             if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
+                 continue;
+ 
+             u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][l1_index])
+                               << DART_PTE_OFFSET_SHIFT);
+-            for (u32 l2_index = 0; l2_index < 0x7ff; l2_index++) {
++            for (u32 l2_index = 0; l2_index < SZ_16K / sizeof(u64); l2_index++) {
+                 if (!(l2[l2_index] & DART_PTE_VALID))
+                     continue;
+                 u64 *dst = (u64 *)(FIELD_GET(dart->params->offset_mask, l2[l2_index])

@@ -1,0 +1,110 @@
+diff --git a/arch/arm64/boot/dts/apple/t6030-j514s.dts b/arch/arm64/boot/dts/apple/t6030-j514s.dts
+--- a/arch/arm64/boot/dts/apple/t6030-j514s.dts
++++ b/arch/arm64/boot/dts/apple/t6030-j514s.dts
+@@ -11,6 +11,7 @@
+ 
+ #include "t6030.dtsi"
+ #include "t603x-j514-j516.dtsi"
++#include "t6030-display.dtsi"
+ 
+ / {
+ 	compatible = "apple,j514s", "apple,t6030", "apple,arm-platform";
+diff --git a/arch/arm64/boot/dts/apple/t6030-display.dtsi b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+new file mode 100644
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Development-only internal display topology, checked against J514s 23J220.
++ * Keep disabled until clock, panel and loader memory handoff are implemented.
++ * Runtime carveouts and IOVAs must come from that boot, never this source file.
++ */
++
++/ {
++	aliases {
++		dcp = &dcp;
++		disp0 = &display;
++		disp0_piodma = &disp0_piodma;
++	};
++};
++
++&soc {
++	disp0_dart: iommu@28d304000 {
++		compatible = "apple,t6030-dart", "apple,t8110-dart";
++		reg = <0x2 0x8d304000 0x0 0x4000>;
++		#iommu-cells = <1>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ 609 IRQ_TYPE_LEVEL_HIGH>;
++		power-domains = <&ps_disp_cpu>;
++		apple,dma-range = <0x100 0x0 0x10 0x0>;
++		status = "disabled";
++	};
++
++	dcp_dart: iommu@28d30c000 {
++		compatible = "apple,t6030-dart", "apple,t8110-dart";
++		reg = <0x2 0x8d30c000 0x0 0x4000>;
++		#iommu-cells = <1>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ 609 IRQ_TYPE_LEVEL_HIGH>;
++		power-domains = <&ps_disp_cpu>;
++		apple,dma-range = <0x100 0x0 0x10 0x0>;
++		status = "disabled";
++	};
++
++	dcp_mbox: mbox@28ec08000 {
++		compatible = "apple,t6030-asc-mailbox", "apple,asc-mailbox-v4";
++		reg = <0x2 0x8ec08000 0x0 0x4000>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ 589 IRQ_TYPE_LEVEL_HIGH>,
++			     <AIC_IRQ 590 IRQ_TYPE_LEVEL_HIGH>,
++			     <AIC_IRQ 591 IRQ_TYPE_LEVEL_HIGH>,
++			     <AIC_IRQ 592 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "send-empty", "send-not-empty",
++				  "recv-empty", "recv-not-empty";
++		#mbox-cells = <0>;
++		power-domains = <&ps_disp_cpu>;
++		status = "disabled";
++	};
++
++	pmgr_dcp: power-management@3503d0000 {
++		reg = <0x3 0x503d0000 0x0 0x4000>;
++		reg-names = "dcp-bw-scratch";
++		#apple,bw-scratch-cells = <3>;
++	};
++
++	dcp: dcp@28ec00000 {
++		compatible = "apple,t6030-dcp", "apple,dcp";
++		reg-names = "coproc", "disp-0", "disp-1", "disp-2", "disp-3", "disp-4";
++		reg = <0x2 0x8ec00000 0x0 0x4000>,
++		      <0x2 0x8c000000 0x0 0x690000>,
++		      <0x2 0x8c800000 0x0 0x690000>,
++		      <0x2 0x8d320000 0x0 0x4000>,
++		      <0x2 0x8d344000 0x0 0x4000>,
++		      <0x2 0x8e800000 0x0 0x800000>;
++		/* The driver appends the sixth Apple display resource at slot 5. */
++		apple,bw-scratch = <&pmgr_dcp 0 5 0x988>;
++		mboxes = <&dcp_mbox>;
++		mbox-names = "mbox";
++		iommus = <&dcp_dart 5>;
++		power-domains = <&ps_disp_cpu>;
++		resets = <&ps_disp_cpu>;
++		phandle = <&dcp>;
++		#address-cells = <2>;
++		#size-cells = <2>;
++		/* No guessed clock, panel geometry or runtime memory properties. */
++		status = "disabled";
++
++		disp0_piodma: piodma {
++			iommus = <&disp0_dart 4>;
++			phandle = <&disp0_piodma>;
++		};
++	};
++
++	display: display-subsystem {
++		compatible = "apple,display-subsystem";
++		iommus = <&disp0_dart 0>;
++		phandle = <&display>;
++		status = "disabled";
++	};
++};

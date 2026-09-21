@@ -36,7 +36,7 @@ rm -f "$duplicate/power-thermal.tsv.bak"
 duplicate_out=$(mktemp -d "$MILESTONE_EVIDENCE_ROOT/m2-duplicate.XXXXXX")
 rmdir "$duplicate_out"
 expect_fail "$project_root/scripts/collect-m2-core-power.sh" --dry-run --input-dir "$duplicate" --out "$duplicate_out"
-for signature in panic.log dart-fault.log lockdep.log; do
+for signature in panic.log dart-fault.log lockdep.log apple-power-faults.log; do
     bad="$tmp/bad-$signature"
     cp -R "$valid" "$bad"
     cp "$project_root/tests/fixtures/kernel/$signature" "$bad/kernel.log"
@@ -54,4 +54,5 @@ for token in BUG Oops WARNING SError; do
     "$project_root/scripts/create-evidence-bundle.sh" --milestone M2 --dry-run --input-dir "$bad" --out "$bad_out"
     expect_fail "$project_root/scripts/verify-m2-core-power.sh" --bundle "$bad_out"
 done
+python3 "$project_root/tests/m2-driver-runner-self-test.py"
 printf 'M2-tests=passed\n'

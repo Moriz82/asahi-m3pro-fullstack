@@ -29,8 +29,29 @@ deterministic GNU `headers.tar` whose members are rooted at `usr/include`, plus
 names, source-epoch mtimes, and numeric root owner/group; verifiers reject any
 legacy APFS `headers/` directory, unsafe member, or non-file/non-directory
 member. Linux full and package verification extract the archive only inside
-the pinned Linux builder and compare the API package's case-sensitive
+the pinned read-only Linux inspection container and compare the API package's case-sensitive
 `usr/include` tree byte-for-byte.
+
+### Read-only artifact inspection
+
+The inspection executor is independent of the historical builder. The shared
+`scripts/lib/milestone0-inspection.sh` runner uses one immutable Arch Linux ARM
+base, resolves its Linux/arm64 image ID, and runs only that ID. It has no image
+override or fallback to an artifact-supplied image. Both retained package
+inventories must remain checksum-bound and match the reviewed 48-package
+tool/shared-library contract in `config/milestone0-inspection-packages.txt`.
+The same container rechecks those inventories and its installed package versions
+before executing the unchanged archive/byte-comparison checks.
+
+Networking and capabilities are disabled, root and input mounts are read-only,
+and extraction uses a capped 2 GiB non-executable tmpfs. Inspection logs identify
+the recorded builder separately from the actual executor and contract hash;
+historical manifests are never rewritten. Missing or mismatched tools fail
+closed. This is artifact inspection, not a rebuild or native-support claim.
+The package/full historical builder-ID equality and all clean-rebuild byte and
+provenance comparisons remain mandatory. An unrelated build package may change
+without changing the inspection contract; an inspection dependency change needs
+a reviewed contract/executor update.
 
 `scripts/build-milestone0.sh` forces a clean full-kernel object tree, while a
 direct `scripts/build-linux-full.sh` invocation is incremental unless

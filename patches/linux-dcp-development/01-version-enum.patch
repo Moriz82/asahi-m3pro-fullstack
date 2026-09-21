@@ -1,0 +1,51 @@
+From 5df6021a6d411480b299bd9abc95966dc93b3138 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Fri, 10 Jul 2026 17:47:46 +1000
+Subject: [PATCH] drm: apple: move fw version enum to version_utils.h
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/dcp-internal.h  | 7 +------
+ drivers/gpu/drm/apple/version_utils.h | 6 ++++++
+ 2 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 57832487d9a4ab..6042750f16019f 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -19,6 +19,7 @@
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
+ #include "epic/dpavservep.h"
++#include "version_utils.h"
+ 
+ #define DCP_MAX_PLANES 4
+ 
+@@ -27,12 +28,6 @@ struct apple_dcp_afkep;
+ 
+ struct dcpav_service_epic;
+ 
+-enum dcp_firmware_version {
+-	DCP_FIRMWARE_UNKNOWN,
+-	DCP_FIRMWARE_V_12_3,
+-	DCP_FIRMWARE_V_13_5,
+-};
+-
+ enum {
+ 	SYSTEM_ENDPOINT = 0x20,
+ 	TEST_ENDPOINT = 0x21,
+diff --git a/drivers/gpu/drm/apple/version_utils.h b/drivers/gpu/drm/apple/version_utils.h
+index 5a33ce1db61c47..35f82e6ad56c01 100644
+--- a/drivers/gpu/drm/apple/version_utils.h
++++ b/drivers/gpu/drm/apple/version_utils.h
+@@ -12,4 +12,10 @@
+ #define DCP_FW_NAME(name) CONCATENATE(name, DCP_FW_SUFFIX)
+ #define DCP_FW_VERSION(x, y, z) ( ((x) << 16) | ((y) << 8) | (z) )
+ 
++enum dcp_firmware_version {
++	DCP_FIRMWARE_UNKNOWN,
++	DCP_FIRMWARE_V_12_3,
++	DCP_FIRMWARE_V_13_5,
++};
++
+ #endif /*__APPLE_VERSION_UTILS_H__*/

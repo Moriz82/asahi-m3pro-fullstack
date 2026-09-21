@@ -1,0 +1,232 @@
+diff --git a/src/iova.c b/src/iova.c
+index 29a2549..69e71d8 100644
+--- a/src/iova.c
++++ b/src/iova.c
+@@ -17,10 +17,19 @@ struct iova_domain {
+     struct iova_block *free_list;
+ };
+ 
++static bool iova_round_size(size_t *sz)
++{
++    if (!*sz || *sz > (size_t)-1 - (SZ_16K - 1))
++        return false;
++    *sz = ALIGN_UP(*sz, SZ_16K);
++    return true;
++}
++
+ iova_domain_t *iovad_init(u64 base, u64 limit)
+ {
+-    if (base != ALIGN_UP(base, SZ_32M)) {
+-        printf("iovad_init: base it not is not aligned to SZ_32M\n");
++    if ((base & (SZ_32M - 1)) || (limit & (SZ_16K - 1)) ||
++        limit <= (base ? base : SZ_16K)) {
++        printf("iovad_init: invalid domain bounds/alignment\n");
+         return NULL;
+     }
+ 
+@@ -35,8 +44,8 @@ iova_domain_t *iovad_init(u64 base, u64 limit)
+     }
+ 
+     /* don't hand out NULL pointers */
+-    blk->iova = base;
+-    blk->sz = limit - SZ_16K;
++    blk->iova = base ? base : SZ_16K;
++    blk->sz = limit - blk->iova;
+     blk->next = NULL;
+     iovad->base = base;
+     iovad->limit = limit;
+@@ -57,21 +66,26 @@ void iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart)
+     }
+ 
+     if (dart)
+-        for (u64 addr = iovad->base; addr < iovad->limit; addr += SZ_32M)
++        for (u64 addr = iovad->base; addr < iovad->limit; addr += SZ_32M) {
+             dart_free_l2(dart, addr);
++            if (iovad->limit - addr <= SZ_32M)
++                break;
++        }
+ 
+     free(iovad);
+ }
+ 
+ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz)
+ {
++    if (!sz)
++        return true;
++    if (iova < iovad->base || iova >= iovad->limit || sz > iovad->limit - iova)
++        return false;
++    u64 end = ALIGN_UP(iova + sz, SZ_16K);
+     iova = ALIGN_DOWN(iova, SZ_16K);
+-    sz = ALIGN_UP(sz, SZ_16K);
+-
+-    if (iova == 0) {
+-        iova += SZ_16K;
+-        sz -= SZ_16K;
+-    }
++    if (!iova)
++        iova = SZ_16K;
++    sz = end - iova;
+     if (sz == 0)
+         return true;
+ 
+@@ -84,7 +98,7 @@ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz)
+     struct iova_block *blk_prev = NULL;
+     while (blk != NULL) {
+         if (iova >= blk->iova && iova < (blk->iova + blk->sz)) {
+-            if (iova + sz >= (blk->iova + blk->sz)) {
++            if (sz > blk->sz - (iova - blk->iova)) {
+                 printf("iova_reserve: tried to reserve [%lx; +%lx] but block in free list has "
+                        "range [%lx; +%lx]\n",
+                        iova, sz, blk->iova, blk->sz);
+@@ -97,7 +111,7 @@ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz)
+                 if (blk_prev)
+                     blk_prev->next = blk->next;
+                 else
+-                    iovad->free_list = NULL;
++                    iovad->free_list = blk->next;
+ 
+                 free(blk);
+                 return true;
+@@ -137,7 +151,8 @@ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz)
+ 
+ u64 iova_alloc(iova_domain_t *iovad, size_t sz)
+ {
+-    sz = ALIGN_UP(sz, SZ_16K);
++    if (!iova_round_size(&sz))
++        return 0;
+ 
+     struct iova_block *blk_prev = NULL;
+     struct iova_block *blk = iovad->free_list;
+@@ -170,62 +185,41 @@ u64 iova_alloc(iova_domain_t *iovad, size_t sz)
+ 
+ void iova_free(iova_domain_t *iovad, u64 iova, size_t sz)
+ {
+-    sz = ALIGN_UP(sz, SZ_16K);
++    if (!sz)
++        return;
++    if (!iova || (iova & (SZ_16K - 1)) || !iova_round_size(&sz) ||
++        iova < iovad->base || iova >= iovad->limit || sz > iovad->limit - iova)
++        panic("iova_free: invalid range\n");
+ 
+     struct iova_block *blk_prev = NULL;
+     struct iova_block *blk = iovad->free_list;
+-
+-    /* create a new free list if it's empty */
+-    if (!blk) {
+-        blk = calloc(1, sizeof(*blk));
+-        if (!blk)
+-            panic("out of memory in iovad_free");
+-        blk->iova = iova;
+-        blk->sz = sz;
+-        blk->next = NULL;
+-        iovad->free_list = blk;
+-        return;
++    while (blk && blk->iova < iova) {
++        blk_prev = blk;
++        blk = blk->next;
+     }
+ 
+-    while (blk != NULL) {
+-        if ((iova + sz) == blk->iova) {
+-            /* extend the block at the beginning */
+-            blk->iova -= sz;
+-            blk->sz += sz;
+-
+-            /* if we have just extended the start of the free list we're already done */
+-            if (!blk_prev)
+-                return;
+-
+-            /* check if we can merge two blocks otherwise */
+-            if ((blk_prev->iova + blk_prev->sz) == blk->iova) {
+-                blk_prev->sz += blk->sz;
+-                blk_prev->next = blk->next;
+-                free(blk);
+-            }
++    if ((blk_prev && blk_prev->iova + blk_prev->sz > iova) ||
++        (blk && iova + sz > blk->iova))
++        panic("iova_free: overlapping free range\n");
+ 
+-            return;
+-        } else if ((iova + sz) < blk->iova) {
+-            /* create a new block */
+-            struct iova_block *blk_new = calloc(1, sizeof(*blk_new));
+-            if (!blk_new)
+-                panic("iova_free: out of memory\n");
+-
+-            blk_new->iova = iova;
+-            blk_new->sz = sz;
+-            blk_new->next = blk;
+-
+-            if (blk_prev)
+-                blk_prev->next = blk_new;
+-            else
+-                iovad->free_list = blk_new;
+-
+-            return;
++    if (blk_prev && blk_prev->iova + blk_prev->sz == iova) {
++        blk_prev->sz += sz;
++        if (blk && iova + sz == blk->iova) {
++            blk_prev->sz += blk->sz;
++            blk_prev->next = blk->next;
++            free(blk);
+         }
+-
+-        blk_prev = blk;
+-        blk = blk->next;
++    } else if (blk && iova + sz == blk->iova) {
++        blk->iova = iova;
++        blk->sz += sz;
++    } else {
++        struct iova_block *blk_new = calloc(1, sizeof(*blk_new));
++        if (!blk_new)
++            panic("iova_free: out of memory\n");
++        *blk_new = (struct iova_block){.iova = iova, .sz = sz, .next = blk};
++        if (blk_prev)
++            blk_prev->next = blk_new;
++        else
++            iovad->free_list = blk_new;
+     }
+-
+-    panic("iovad_free: corruption detected, unable to insert freed range\n");
+ }
+diff --git a/src/iova.h b/src/iova.h
+index 1637be4..1cf563c 100644
+--- a/src/iova.h
++++ b/src/iova.h
+@@ -8,11 +8,14 @@
+ 
+ typedef struct iova_domain iova_domain_t;
+ 
++/* Exclusive page-aligned limit; base is 32 MiB aligned. Page zero is excluded. */
+ iova_domain_t *iovad_init(u64 base, u64 limit);
+ void iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart);
+ 
++/* Reserve every page intersecting [iova, iova + sz), atomically on failure. */
+ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz);
+ u64 iova_alloc(iova_domain_t *iovad, size_t sz);
++/* Free an exact caller-owned range; invalid/overlapping frees are fatal. */
+ void iova_free(iova_domain_t *iovad, u64 iova, size_t sz);
+ 
+ #endif
+diff --git a/src/display.c b/src/display.c
+index fdd286d..e50b0d0 100644
+--- a/src/display.c
++++ b/src/display.c
+@@ -516,11 +516,15 @@ int display_configure(const char *config)
+             return -1;
+         }
+ 
++        tmp_dva = iova_alloc(dcp->iovad_dcp, size);
++        if (!tmp_dva) {
++            printf("display: no IOVA space for new framebuffer\n");
++            return -1;
++        }
++
+         fb_pa = top_of_memory_alloc(size);
+         memset((void *)fb_pa, 0, size);
+ 
+-        tmp_dva = iova_alloc(dcp->iovad_dcp, size);
+-
+         tmp_dva = display_map_fb(tmp_dva, fb_pa, size);
+         if (DART_IS_ERR(tmp_dva)) {
+             printf("display: failed to map new fb\n");

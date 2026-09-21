@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${project_root}/config/milestone0.env"
 source "${project_root}/config/milestone1.env"
+source "${project_root}/scripts/lib/milestone1-evidence.sh"
 readonly m0_root="${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0"
 
 verify_checksum_manifest() {
@@ -41,6 +42,7 @@ for line in data.splitlines(keepends=True):
         raise SystemExit('duplicate or escaping checksum path')
     listed[rel] = match.group(1).decode('ascii')
 actual = {}
+directories = set()
 for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
     for name in list(dirs) + list(files):
         path = os.path.join(current, name)
@@ -48,12 +50,16 @@ for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
             raise SystemExit('symlink anywhere in evidence tree')
         if not os.path.isdir(path) and not stat.S_ISREG(os.lstat(path).st_mode):
             raise SystemExit('non-regular evidence tree member')
+        if os.path.isdir(path):
+            directories.add(os.path.relpath(path, root).replace(os.sep, '/'))
     for name in files:
         path = os.path.join(current, name)
         rel = os.path.relpath(path, root).replace(os.sep, '/')
         if rel != 'SHA256SUMS' and (scope == 'recursive' or current == root):
             digest = hashlib.sha256(open(path, 'rb').read()).hexdigest()
             actual[rel] = digest
+if any(not any(name.startswith(directory + '/') for name in actual) for directory in directories):
+    raise SystemExit('empty or undeclared evidence directory')
 if set(listed) != set(actual):
     raise SystemExit('checksum manifest has missing or extra files')
 for rel, expected in listed.items():
@@ -73,12 +79,15 @@ if [[ "${1:-}" == --self-test ]]; then
     exit 0
 fi
 readonly evidence="${1:-}"
+[[ $# -eq 3 ]] || { printf 'Require SESSION_DIR EXPECTED_TARGET_ID_SHA256 INDEPENDENT_ANCHORS_FILE.\n' >&2; exit 64; }
+readonly expected_target="$2" anchors_file="$3"
 test -n "$evidence" && test -d "$evidence" || { printf 'Session directory is required.\n' >&2; exit 2; }
 for required in manifest.txt records.tsv SHA256SUMS; do
     test -s "$evidence/$required" || { printf 'Missing session evidence: %s\n' "$evidence/$required" >&2; exit 1; }
 done
-verify_checksum_manifest "$evidence" "$evidence/SHA256SUMS" top-level
-grep -Fx 'format=1' "$evidence/manifest.txt" >/dev/null
+verify_checksum_manifest "$evidence" "$evidence/SHA256SUMS"
+m1_provenance session-identity "$evidence/manifest.txt" "$expected_target" "$anchors_file"
+grep -Fx 'format=2' "$evidence/manifest.txt" >/dev/null
 grep -Fx 'status=complete' "$evidence/manifest.txt" >/dev/null
 grep -Fx 'storage_policy=ram-only' "$evidence/manifest.txt" >/dev/null
 grep -Fx 'evidence_policy=checksummed-execution-and-serial' "$evidence/manifest.txt" >/dev/null
@@ -100,15 +109,17 @@ grep -Fx "image_sha256=${image_sha256}" "$evidence/manifest.txt" >/dev/null
 grep -Fx "dtb_sha256=${dtb_sha256}" "$evidence/manifest.txt" >/dev/null
 
 scan_clean() {
-    local file="$1"
-    if grep -Eiq 'corrupt(ion)?|kernel panic|panic:|I/O error|data loss|filesystem (error|corrupt)|watchdog reset|unexpected reset|fault signature|gate_failed' "$file"; then
-        printf 'Fault, corruption, or gate signature found: %s\n' "$file" >&2
-        return 1
-    fi
+    local file="$1" scan_status=0
+    grep -Eiq 'corrupt(ion)?|kernel panic|panic:|I/O error|data loss|filesystem (error|corrupt)|watchdog reset|unexpected reset|fault signature|gate_failed' "$file" || scan_status=$?
+    case "$scan_status" in
+        0) printf 'Fault, corruption, or gate signature found: %s\n' "$file" >&2; return 1 ;;
+        1) return 0 ;;
+        *) printf 'Could not scan evidence log: %s (exit %s)\n' "$file" "$scan_status" >&2; return 1 ;;
+    esac
 }
 
 readonly evidence_real="$(cd "$evidence" && pwd -P)"
-for entry in "$evidence"/*; do
+while IFS= read -r -d '' entry; do
     name="$(basename "$entry")"
     case "$name" in
         manifest.txt|records.tsv|SHA256SUMS|evidence-watchdog.txt|evidence-panic.txt|evidence-reboot.txt|evidence-macos-return.txt|evidence-dfu.txt)
@@ -119,7 +130,7 @@ for entry in "$evidence"/*; do
             printf 'Unexpected session evidence entry: %s\n' "$entry" >&2
             exit 1 ;;
     esac
-done
+done < <(find -P "$evidence" -mindepth 1 -maxdepth 1 -print0)
 count="$(awk -v required="$M1_REQUIRED_BOOT_COUNT" -F '\t' '
     BEGIN { good=0; bad=0 }
     /^[[:space:]]*$/ || /^#/ { next }
@@ -132,9 +143,13 @@ if [[ "$count" != "$M1_REQUIRED_BOOT_COUNT" ]]; then
     printf 'Expected exactly %s successful records; found %s.\n' "$M1_REQUIRED_BOOT_COUNT" "$count" >&2
     exit 1
 fi
+seen_execution_ids='|'
 while IFS=$'\t' read -r boot_id result execution_dir serial_path; do
     [[ -z "$boot_id" || "$boot_id" == \#* ]] && continue
     if [[ "$result" != success ]]; then exit 1; fi
+    [[ "$boot_id" =~ ^([1-9]|1[0-9]|20)$ && "$execution_dir" == "run-$boot_id" && "$serial_path" == serial.log ]] || {
+        printf 'Each record must select its own numbered execution and serial.log.\n' >&2; exit 1;
+    }
     if [[ "$execution_dir" == /* || "$execution_dir" == *..* || "$serial_path" == /* || "$serial_path" == *..* ]]; then exit 1; fi
     execution_path="$evidence/$execution_dir"
     test -d "$execution_path" && test ! -L "$execution_path"
@@ -144,6 +159,14 @@ while IFS=$'\t' read -r boot_id result execution_dir serial_path; do
         test -s "$execution_path/$required" || { printf 'Missing execution evidence: %s\n' "$execution_path/$required" >&2; exit 1; }
     done
     verify_checksum_manifest "$execution_path" "$execution_path/SHA256SUMS"
+    m1_provenance execution-verify "$execution_real" "$expected_target" "$anchors_file"
+    execution_id="$(awk -F= '$1 == "execution_id" {print $2}' "$execution_path/manifest.txt")"
+    [[ "$seen_execution_ids" != *"|$execution_id|"* ]] || { printf 'Duplicate execution ID.\n' >&2; exit 1; }
+    seen_execution_ids="${seen_execution_ids}${execution_id}|"
+    for key in target_identity_sha256 controller_identity_sha256 m1n1_tool_sha256; do
+        value="$(awk -F= -v key="$key" '$1 == key {print $2}' "$evidence/manifest.txt")"
+        grep -Fx "$key=$value" "$execution_path/manifest.txt" >/dev/null
+    done
     serial_file="$execution_path/$serial_path"
     test -f "$serial_file" && test ! -L "$serial_file"
     serial_real="$(cd "$(dirname "$serial_file")" && pwd -P)/$(basename "$serial_file")"

@@ -1,0 +1,266 @@
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -138,6 +138,8 @@
+ 
+ 	/* clock rate request by dcp in */
+ 	struct clk *clk;
++	/* T6030 display clocks are retained for the platform-device lifetime. */
++	struct clk *video_clk;
+ 
+ 	/* DCP shared memory */
+ 	void *shmem;
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -983,6 +983,30 @@
+ 		compat_str, fw_str);
+ 
+ 	return DCP_FIRMWARE_UNKNOWN;
++}
++
++static int dcp_get_display_clocks(struct apple_dcp *dcp)
++{
++	struct device *dev = dcp->dev;
++	struct clk *pixel, *video;
++
++	if (!of_device_is_compatible(dev->of_node, "apple,t6030-dcp"))
++		return 0;
++	if (!of_machine_is_compatible("apple,j514s") ||
++	    dcp->fw_compat != DCP_FIRMWARE_V_14_7)
++		return dev_err_probe(dev, -ENODEV, "Unverified T6030 clock contract\n");
++
++	pixel = devm_clk_get(dev, "pixel");
++	if (IS_ERR(pixel))
++		return dev_err_probe(dev, PTR_ERR(pixel), "Unable to find pixel clock\n");
++	video = devm_clk_get(dev, "video");
++	if (IS_ERR(video))
++		return dev_err_probe(dev, PTR_ERR(video), "Unable to find video clock\n");
++
++	/* A zero rate is a valid firmware fallback value, not a missing clock. */
++	dcp->clk = pixel;
++	dcp->video_clk = video;
++	return 0;
+ }
+ 
+ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+@@ -1068,10 +1092,12 @@
+ 		return ret;
+ 	}
+ 
+-	dcp->clk = devm_clk_get(dev, NULL);
+-	if (IS_ERR(dcp->clk))
+-		return dev_err_probe(dev, PTR_ERR(dcp->clk),
+-				     "Unable to find clock\n");
++	if (!dcp->video_clk) {
++		dcp->clk = devm_clk_get(dev, NULL);
++		if (IS_ERR(dcp->clk))
++			return dev_err_probe(dev, PTR_ERR(dcp->clk),
++					     "Unable to find clock\n");
++	}
+ 
+ 	bitmap_zero(dcp->memdesc_map, DCP_MAX_MAPPINGS);
+ 	// TDOD: mem_desc IDs start at 1, for simplicity just skip '0' entry
+@@ -1156,8 +1182,10 @@
+ 	}
+ 	cancel_work_sync(&dcp->vblank_wq);
+ 
+-	devm_clk_put(dev, dcp->clk);
+-	dcp->clk = NULL;
++	if (!dcp->video_clk) {
++		devm_clk_put(dev, dcp->clk);
++		dcp->clk = NULL;
++	}
+ }
+ 
+ static const struct component_ops dcp_comp_ops = {
+@@ -1170,7 +1198,7 @@
+ 	enum dcp_firmware_version fw_compat;
+ 	struct device *dev = &pdev->dev;
+ 	struct apple_dcp *dcp;
+-	int surf, num_surfs;
++	int ret, surf, num_surfs;
+ 	u32 surf_en;
+ 	u32 mux_index;
+ 
+@@ -1194,6 +1222,13 @@
+ 	dcp->dev = dev;
+ 	dcp->hw = *(struct apple_dcp_hw_data *)of_device_get_match_data(dev);
+ 
++	/* Get target clocks before any PHY/GPIO or component initialization.
++	 * devm releases both on probe failure/removal, not component unbind.
++	 */
++	ret = dcp_get_display_clocks(dcp);
++	if (ret)
++		return ret;
++
+ 	platform_set_drvdata(pdev, dcp);
+ 
+ 	dcp->phy = devm_phy_optional_get(dev, "dp-phy");
+
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -247,6 +247,11 @@
+ 	u32 ret;
+ } __packed;
+ 
++struct dcp_get_frequency_req {
++	u32 provider;
++	u32 index;
++} __packed;
++
+ struct dcp_get_uint_prop_req {
+ 	char obj[4];
+ 	char key[0x40];
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -456,10 +456,25 @@
+ 	};
+ }
+ 
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++static u64 dcpep_cb_get_frequency(struct apple_dcp *dcp,
++				struct dcp_get_frequency_req *req)
++{
++	if (of_device_is_compatible(dcp->dev->of_node, "apple,t6030-dcp")) {
++		if (req->provider != 0x50524f56 || req->index > 1) {
++			dev_warn(dcp->dev, "Invalid display clock request\n");
++			return 0;
++		}
++		return clk_get_rate(req->index ? dcp->video_clk : dcp->clk);
++	}
++	return clk_get_rate(dcp->clk);
++}
++#else
+ static u64 dcpep_cb_get_frequency(struct apple_dcp *dcp)
+ {
+ 	return clk_get_rate(dcp->clk);
+ }
++#endif
+ 
+ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *dcp,
+ 						struct DCP_FW_NAME(dcp_map_reg_req) *req)
+@@ -1141,7 +1156,12 @@
+ TRAMPOLINE_INOUT(trampoline_set_frame_sync_props, dcpep_cb_set_frame_sync_props,
+ 	       struct dcp_set_frame_sync_props_req,
+ 	       struct dcp_set_frame_sync_props_resp);
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++TRAMPOLINE_INOUT(trampoline_get_frequency, dcpep_cb_get_frequency,
++		 struct dcp_get_frequency_req, u64);
++#else
+ TRAMPOLINE_OUT(trampoline_get_frequency, dcpep_cb_get_frequency, u64);
++#endif
+ TRAMPOLINE_OUT(trampoline_get_time, dcpep_cb_get_time, u64);
+ TRAMPOLINE_IN(trampoline_hotplug, dcpep_cb_hotplug, u64);
+ TRAMPOLINE_IN(trampoline_swap_complete_intent_gated,
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -265,10 +265,23 @@
+ 	struct device *dev = dcp->dev;
+ 	struct dcp_packet_header *hdr = data;
+ 	void *in, *out;
+-	int tag = dcp_parse_tag(hdr->tag);
++	int tag;
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
+ 	u8 depth;
+ 
++	if (length < sizeof(*hdr)) {
++		dev_warn(dev, "Truncated callback header\n");
++		return;
++	}
++	tag = dcp_parse_tag(hdr->tag);
++	if (tag == 408 && dcp->fw_compat == DCP_FIRMWARE_V_14_7 &&
++	    (hdr->in_len != sizeof(struct dcp_get_frequency_req) ||
++	     hdr->out_len != sizeof(u64) ||
++	     length < sizeof(*hdr) + sizeof(struct dcp_get_frequency_req) + sizeof(u64))) {
++		dev_warn(dev, "Invalid display clock callback size\n");
++		return;
++	}
++
+ 	if (tag < 0 || tag >= IOMFB_MAX_CB || !dcp->cb_handlers || !dcp->cb_handlers[tag]) {
+ 		dev_warn(dev, "received unknown callback %c%c%c%c\n",
+ 			 hdr->tag[3], hdr->tag[2], hdr->tag[1], hdr->tag[0]);
+
+diff --git a/drivers/gpu/drm/apple/iomfb_internal.h b/drivers/gpu/drm/apple/iomfb_internal.h
+--- a/drivers/gpu/drm/apple/iomfb_internal.h
++++ b/drivers/gpu/drm/apple/iomfb_internal.h
+@@ -81,21 +81,20 @@
+                                                                               \
+ 	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+-		T_out *typed_out = out;                                       \
+ 		callback_##handler cb = handler;                              \
+                                                                               \
+ 		trace_iomfb_callback(dcp, tag, #handler);                     \
+-		*typed_out = cb(dcp, in);                                     \
++		T_out value = cb(dcp, in);                                    \
++		memcpy(out, &value, sizeof(value));                           \
+ 		return true;                                                  \
+ 	}
+ 
+ #define TRAMPOLINE_OUT(func, handler, T_out)                                  \
+ 	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+-		T_out *typed_out = out;                                       \
+-                                                                              \
+ 		trace_iomfb_callback(dcp, tag, #handler);                     \
+-		*typed_out = handler(dcp);                                    \
++		T_out value = handler(dcp);                                  \
++		memcpy(out, &value, sizeof(value));                           \
+ 		return true;                                                  \
+ 	}
+ 
+
+diff --git a/arch/arm64/boot/dts/apple/t6030-display.dtsi b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+--- a/arch/arm64/boot/dts/apple/t6030-display.dtsi
++++ b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+@@ -11,6 +11,23 @@
+ 		disp0 = &display;
+ 		disp0_piodma = &disp0_piodma;
+ 	};
++
++	/* Placeholder rates are replaced from the current boot ADT by m1n1.
++	 * Keep providers disabled with DCP until runtime handoff is implemented.
++	 */
++	dcp_pixel_clk: dcp-pixel-clock {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <0>;
++		status = "disabled";
++	};
++
++	dcp_video_clk: dcp-video-clock {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <0>;
++		status = "disabled";
++	};
+ };
+ 
+ &soc {
+@@ -68,6 +85,8 @@
+ 		      <0x2 0x8e800000 0x0 0x800000>;
+ 		/* The driver appends the sixth Apple display resource at slot 5. */
+ 		apple,bw-scratch = <&pmgr_dcp 0 5 0x988>;
++		clocks = <&dcp_pixel_clk>, <&dcp_video_clk>;
++		clock-names = "pixel", "video";
+ 		mboxes = <&dcp_mbox>;
+ 		mbox-names = "mbox";
+ 		iommus = <&dcp_dart 5>;
+@@ -76,7 +95,7 @@
+ 		phandle = <&dcp>;
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+-		/* No guessed clock, panel geometry or runtime memory properties. */
++		/* No guessed rates, panel geometry or runtime memory properties. */
+ 		status = "disabled";
+ 
+ 		disp0_piodma: piodma {
+
+

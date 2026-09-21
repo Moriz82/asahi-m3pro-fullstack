@@ -6,6 +6,8 @@ readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "${project_root}/config/milestone0.env"
 source "${project_root}/config/milestone1.env"
 source "${project_root}/scripts/lib/atomic-symlink.sh"
+source "${project_root}/scripts/lib/evidence.sh"
+source "${project_root}/scripts/lib/milestone1-evidence.sh"
 readonly output_root="${MILESTONE1_OUTPUT_ROOT:-${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone1}"
 
 validate_m1n1_device() {
@@ -48,12 +50,30 @@ run_with_tee() {
     ((M1_PIPE_PRODUCER_STATUS == 0 && M1_PIPE_TEE_STATUS == 0))
 }
 
-usage() { printf 'Usage: %s [--dfu-rehearsed] [--sample-restore-verified] [--self-test]\n' "$0"; }
+usage() {
+    printf 'Usage: %s --target-readiness --dfu-rehearsed --sample-restore-verified\n' "$0"
+    printf '   or: %s --controller-preflight --target-readiness-dir ABS --expected-target-identity-sha256 HEX --expected-target-bundle-sha256 HEX\n' "$0"
+}
 self_test=false
 dfu=false
 restore=false
+mode=""
+target_dir=""
+expected_target=""
+expected_bundle=""
 while (($#)); do
     case "$1" in
+        --target-readiness|--controller-preflight)
+            [[ -z "$mode" ]] || { usage >&2; exit 64; }
+            mode="$1" ;;
+        --target-readiness-dir|--expected-target-identity-sha256|--expected-target-bundle-sha256)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { usage >&2; exit 64; }
+            case "$1" in
+                --target-readiness-dir) [[ -z "$target_dir" ]] || exit 64; target_dir="$2" ;;
+                --expected-target-identity-sha256) [[ -z "$expected_target" ]] || exit 64; expected_target="$2" ;;
+                --expected-target-bundle-sha256) [[ -z "$expected_bundle" ]] || exit 64; expected_bundle="$2" ;;
+            esac
+            shift ;;
         --dfu-rehearsed) dfu=true ;;
         --sample-restore-verified) restore=true ;;
         --self-test) self_test=true ;;
@@ -64,7 +84,7 @@ while (($#)); do
 done
 
 if "$self_test"; then
-    [[ "$dfu" == false && "$restore" == false ]]
+    [[ "$dfu" == false && "$restore" == false && -z "$mode$target_dir$expected_target$expected_bundle" ]]
     [[ "$M1_PREFLIGHT_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]]
     grep -Fq 'check-native-readiness.sh' "${project_root}/config/milestone1.env"
     readonly pipe_test_log="$(mktemp)"
@@ -92,48 +112,82 @@ if "$self_test"; then
     exit 0
 fi
 
-[[ "$dfu" == true && "$restore" == true ]] || {
-    printf 'Both explicit attestations are required; no readiness check was run.\n' >&2
-    exit 2
-}
-command -v python3 >/dev/null || { printf 'Missing python3 for device validation.\n' >&2; exit 1; }
-readonly m1n1_device="$(validate_m1n1_device "$M1N1DEVICE")"
-test -x "$M1_READINESS_SCRIPT" || { printf 'Missing readiness script: %s\n' "$M1_READINESS_SCRIPT" >&2; exit 1; }
-"${project_root}/scripts/verify-milestone0.sh"
-"${project_root}/scripts/verify-milestone1-initramfs.sh"
+case "$mode" in
+    --target-readiness)
+        [[ "$dfu" == true && "$restore" == true && -z "$target_dir$expected_target$expected_bundle" ]] || {
+            printf 'Target readiness requires both explicit attestations and no controller arguments.\n' >&2; exit 2;
+        }
+        bucket=target-readiness ;;
+    --controller-preflight)
+        [[ "$dfu" == false && "$restore" == false && "$target_dir" == /* &&
+           "$expected_target" =~ ^[0-9a-f]{64}$ && "$expected_bundle" =~ ^[0-9a-f]{64}$ ]] || {
+            printf 'Controller preflight requires an absolute transfer path and both independent target anchors.\n' >&2; exit 2;
+        }
+        bucket=preflight ;;
+    *) usage >&2; exit 64 ;;
+esac
+command -v python3 >/dev/null || { printf 'Missing python3.\n' >&2; exit 1; }
+
+if [[ "$mode" == --controller-preflight ]]; then
+    m1n1_device="$(validate_m1n1_device "$M1N1DEVICE")" || exit 1
+    controller_id="$(m1_host_identity_sha256 controller)" || exit 1
+    test -n "$M1_M1N1_SOURCE_DIR" && test -f "$M1_M1N1_SOURCE_DIR/$M1_M1N1_TOOL_RELATIVE"
+    test "$(git -C "$M1_M1N1_SOURCE_DIR" rev-parse HEAD)" = "$M1N1_COMMIT"
+    test -z "$(git -C "$M1_M1N1_SOURCE_DIR" status --porcelain --untracked-files=all)"
+    tool_sha="$(evidence_sha256 "$M1_M1N1_SOURCE_DIR/$M1_M1N1_TOOL_RELATIVE")"
+    "${project_root}/scripts/verify-milestone0.sh"
+    m0_run_dir="$(resolve_versioned_run "${MILESTONE0_OUTPUT_ROOT:-${project_root}/out}/milestone0/linux-full" latest 'M0 Linux')" || exit 1
+    m1_initramfs_run_dir="$(resolve_versioned_run "${output_root}/initramfs" latest 'M1 initramfs')" || exit 1
+    "${project_root}/scripts/verify-linux-full.sh" "$m0_run_dir"
+    "${project_root}/scripts/verify-milestone1-initramfs.sh" "$m1_initramfs_run_dir" "$m0_run_dir"
+    binding="$(m1_artifact_binding "$m0_run_dir" "$m1_initramfs_run_dir")" || exit 1
+else
+    target_id="$(m1_host_identity_sha256 target)" || exit 1
+    test -x "$M1_READINESS_SCRIPT" && test ! -L "$M1_READINESS_SCRIPT"
+    [[ "$(evidence_sha256 "$M1_READINESS_SCRIPT")" == "$M1_READINESS_SCRIPT_SHA256" ]] || {
+        printf 'Readiness script differs from reviewed pin.\n' >&2; exit 1;
+    }
+fi
 
 readonly run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N8 -tx1 /dev/urandom | tr -d "[:space:]")"
-readonly stage="${output_root}/preflight/.${run_id}.tmp"
-readonly destination="${output_root}/preflight/${run_id}"
-readonly latest="${output_root}/preflight/latest"
-readonly latest_tmp="${output_root}/preflight/.latest.${run_id}.tmp"
-mkdir -p "${output_root}/preflight"
+readonly stage="${output_root}/${bucket}/.${run_id}.tmp"
+readonly destination="${output_root}/${bucket}/${run_id}"
+readonly latest="${output_root}/${bucket}/latest"
+readonly latest_tmp="${output_root}/${bucket}/.latest.${run_id}.tmp"
+mkdir -p "${output_root}/${bucket}"
 if [[ -e "$stage" || -L "$stage" || -e "$destination" || -L "$destination" || -e "$latest_tmp" || -L "$latest_tmp" ]] ||
     [[ -e "$latest" && ! -L "$latest" ]]; then
-    printf 'Refusing colliding Milestone 1 preflight publication path.\n' >&2
-    exit 1
+    printf 'Refusing colliding Milestone 1 preflight publication path.\n' >&2; exit 1
 fi
-mkdir "$stage"
-if ! run_with_tee "$stage/readiness.log" "$M1_READINESS_SCRIPT" --dfu-rehearsed --sample-restore-verified; then
-    printf 'format=1\nstatus=blocked\nproducer_exit=%s\ntee_exit=%s\n' \
-        "$M1_PIPE_PRODUCER_STATUS" "$M1_PIPE_TEE_STATUS" >"$stage/manifest.txt"
-    mv "$stage" "$destination"
-    atomic_symlink_replace "$run_id" "$latest" "$latest_tmp"
-    printf 'milestone1.preflight=blocked\n' >&2
-    exit 2
+mkdir -m 0700 "$stage"
+trap 'rm -rf "$stage"' EXIT
+if [[ "$mode" == --target-readiness ]]; then
+    if ! run_with_tee "$stage/readiness.log" "$M1_READINESS_SCRIPT" --dfu-rehearsed --sample-restore-verified; then
+        printf 'format=2\nkind=target-readiness\nstatus=blocked\nproducer_exit=%s\ntee_exit=%s\n' \
+            "$M1_PIPE_PRODUCER_STATUS" "$M1_PIPE_TEE_STATUS" >"$stage/manifest.txt"
+        evidence_atomic_publish_directory "$stage" "$destination"
+        # Failed reports are audit-only; never replace a successful pointer.
+        printf 'milestone1.target-readiness=blocked path=%s\n' "$destination" >&2
+        exit 2
+    fi
+    [[ "$(evidence_sha256 "$M1_READINESS_SCRIPT")" == "$M1_READINESS_SCRIPT_SHA256" ]]
+    [[ "$(m1_host_identity_sha256 target)" == "$target_id" ]]
+    completed_epoch="$(date -u +%s)"
+    m1_write_target_readiness "$stage" "$target_id" "$completed_epoch"
+    target_digest="$(m1_target_readiness_digest "$stage")"
+    m1_verify_target_readiness "$stage" "$target_id" "$target_digest" "$completed_epoch"
+else
+    completed_epoch="$(date -u +%s)"
+    m1_write_controller_preflight "$stage" "$target_dir" "$expected_target" "$expected_bundle" \
+        "$controller_id" "$m1n1_device" "$tool_sha" "$binding" "$completed_epoch"
+    m1_verify_controller_preflight "$stage" "$expected_target" "$expected_bundle" "$controller_id" \
+        "$m1n1_device" "$tool_sha" "$binding" "$(date -u +%s)"
 fi
-readonly readiness_status="$M1_PIPE_PRODUCER_STATUS"
-readonly tee_status="$M1_PIPE_TEE_STATUS"
-readonly completed_epoch="$(date -u +%s)"
-{
-    printf 'format=1\nstatus=passed\ncompleted_epoch=%s\n' "$completed_epoch"
-    printf 'dfu_rehearsed=true\nsample_restore_verified=true\n'
-    printf 'producer_exit=%s\ntee_exit=%s\npipe_status=%s,%s\n' "$readiness_status" "$tee_status" "$readiness_status" "$tee_status"
-    printf 'readiness_script=%s\ndevice=%s\n' "$M1_READINESS_SCRIPT" "$m1n1_device"
-    printf 'readiness_sha256=%s\n' "$(shasum -a 256 "$stage/readiness.log" | awk '{print $1}')"
-    printf 'expires_after_seconds=%s\n' "$M1_PREFLIGHT_MAX_AGE_SECONDS"
-} >"$stage/manifest.txt"
-shasum -a 256 "$stage/readiness.log" "$stage/manifest.txt" >"$stage/SHA256SUMS"
-mv "$stage" "$destination"
+evidence_atomic_publish_directory "$stage" "$destination"
 atomic_symlink_replace "$run_id" "$latest" "$latest_tmp"
-printf 'milestone1.preflight=passed path=%s\n' "$destination"
+trap - EXIT
+printf 'milestone1.%s=passed path=%s\n' "$bucket" "$destination"
+if [[ "$mode" == --target-readiness ]]; then
+    printf 'target_identity_sha256=%s\ntarget_readiness_bundle_sha256=%s\n' "$target_id" "$target_digest"
+    printf 'Retain these anchors independently of the transferred bundle. Checksums alone do not authenticate origin.\n'
+fi

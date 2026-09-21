@@ -1,0 +1,46 @@
+diff --git a/proxyclient/m1n1/fw/dcp/manager.py b/proxyclient/m1n1/fw/dcp/manager.py
+index 45e1136..bb389c8 100644
+--- a/proxyclient/m1n1/fw/dcp/manager.py
++++ b/proxyclient/m1n1/fw/dcp/manager.py
+@@ -45,7 +45,8 @@ class DCPBaseManager:
+         except Exception as e:
+             print(f"Exception in callback {method.name}")
+             raise
+-        self.in_callback -= 1
++        finally:
++            self.in_callback -= 1
+         return retval
+ 
+     def __getattr__(self, attr):
+@@ -342,7 +343,30 @@ class DCPManager(DCPBaseManager):
+     def set_fx_prop(self, obj, key, value):
+         print(f"set_fx_prop({obj}, {key} = {value})")
+ 
+-    def sr_mapDeviceMemoryWithIndex(self, obj, index, flags, addr, length):
++    def sr_mapDeviceMemoryWithIndex(self, obj, index, flags, addr, length, unk_u64=None):
++        if self.compatible == 't6030':
++            # 23J220 ServiceRelay returns PA in BOTH address fields for direct
++            # registers. Bit 31 instead requests a DCP DMA mapping; do not fake
++            # that address or initialize a DART through this metadata path.
++            if (not ipc.Ver.check("V == V14_7") or obj != 'PROV' or flags != 0x100 or
++                    type(index) is not int or not 0 <= index < 6 or
++                    unk_u64 is None or addr is None or length is None):
++                raise ValueError("unverified T6030 register-map request")
++            adt = self.dcp.u.adt
++            disp = adt['/arm-io/disp0']
++            if (adt.model != 'Mac15,6' or 'J514sAP' not in adt.compatible or
++                    list(disp.compatible) != ['disp0,t6030'] or len(disp.reg) != 6):
++                raise ValueError("unverified T6030 display provider")
++            paddr, size = disp.get_reg(index)
++            if (not isinstance(paddr, int) or not isinstance(size, int) or paddr <= 0 or
++                    size <= 0 or paddr % 0x4000 or size % 0x4000 or
++                    paddr + size > 1 << 64):
++                raise ValueError("invalid T6030 register resource")
++            unk_u64.val = addr.val = paddr
++            length.val = size
++            return 0
++        if unk_u64 is not None:
++            raise ValueError("unverified extended register-map callback")
+         assert obj == "PROV"
+         addr.val, length.val = self.dcp.u.adt["/arm-io/disp0"].get_reg(index)
+         print(f"sr_mapDeviceMemoryWithIndex({obj}, {index}, {flags}, {addr.val:#x}, {length.val:#x})")

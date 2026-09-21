@@ -1,0 +1,50 @@
+diff --git a/src/kboot.c b/src/kboot.c
+index 92ef5c0..6db1bc2 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -1449,17 +1449,14 @@ static int dt_device_set_reserved_mem(int node, const char *name, uint32_t phand
+ {
+     int ret;
+ 
+-    ret = fdt_appendprop_u32(dt, node, "iommu-addresses", phandle);
+-    if (ret != 0)
+-        bail("FDT: could not append phandle to '%s.iommu-addresses' property: %d\n", name, ret);
+-
+-    ret = fdt_appendprop_u64(dt, node, "iommu-addresses", iova);
+-    if (ret != 0)
+-        bail("FDT: could not append iova to '%s.iommu-addresses' property: %d\n", name, ret);
+-
+-    ret = fdt_appendprop_u64(dt, node, "iommu-addresses", size);
++    /* Publish one complete <phandle, address, size> record. Separate appends
++     * can leave a truncated record if the FDT runs out of space midway.
++     */
++    fdt32_t record[] = {cpu_to_fdt32(phandle), cpu_to_fdt32(iova >> 32), cpu_to_fdt32(iova),
++                        cpu_to_fdt32(size >> 32), cpu_to_fdt32(size)};
++    ret = fdt_appendprop(dt, node, "iommu-addresses", record, sizeof(record));
+     if (ret != 0)
+-        bail("FDT: could not append size to '%s.iommu-addresses' property: %d\n", name, ret);
++        bail("FDT: could not append record to '%s.iommu-addresses' property: %d\n", name, ret);
+ 
+     return 0;
+ }
+@@ -1653,8 +1650,10 @@ static int dt_add_reserved_regions(const char *dcp_alias, const char *disp_alias
+         snprintf(node_name, sizeof(node_name), "%s@%lx", name, region[i].paddr);
+         int mem_node =
+             dt_get_or_add_reserved_mem(node_name, compat, true, region[i].paddr, region[i].size);
+-        if (mem_node < 0)
++        if (mem_node < 0) {
++            ret = mem_node;
+             goto err;
++        }
+ 
+         uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
+ 
+@@ -1851,7 +1850,7 @@ static int dt_reserve_asc_firmware(const char *adt_path, const char *adt_path_al
+         int mem_node =
+             dt_get_or_add_reserved_mem(node_name, "apple,asc-mem", true, seg->phys, seg_size);
+         if (mem_node < 0)
+-            return ret;
++            return mem_node;
+         uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
+ 
+         ret = dt_device_set_reserved_mem(mem_node, node_name, dev_phandle, iova, seg_size);

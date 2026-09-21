@@ -1,0 +1,87 @@
+Subject: [DEVELOPMENT PATCH] drm/apple: describe the six-surface 14.7 A407 layout
+
+Offline T6030 and T8122 23J220 firmware readers both decode six secondary
+556-byte surface records, six IOVAs and six null bytes. Replace the guessed
+0x234-byte extension with those fields, and initialize all secondary flags.
+The request remains 7000 bytes; controls now occupy their actual wire offsets.
+Also adapt the upstream WIP flush call to the pinned 7.1 atomic-state API.
+
+Evidence: docs/dcp-abi-development-2026-09-06.md.
+No native validation. Not selected by the canonical or development boot builds.
+
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -489,7 +489,7 @@
+ 		iomfb_flush_v13_3(dcp, crtc, state);
+ 		break;
+ 	case DCP_FIRMWARE_V_14_7:
+-		iomfb_flush_v14_7_0(dcp, crtc, commit);
++		iomfb_flush_v14_7_0(dcp, crtc, state);
+ 		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -100,9 +100,15 @@
+ 	u64 surf_iova[SWAP_SURFACES];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u64 unk_u64_a[SWAP_SURFACES];
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	/* T6030 23J220 A407: six 556-byte records, then six IOVAs. */
++	struct DCP_FW_NAME(dcp_surface) surf2[6];
++	u64 surf2_iova[6];
++#else
+ 	struct DCP_FW_NAME(dcp_surface) surf2[5];
+ 	u64 surf2_iova[5];
+ #endif
++#endif
+ 	u8 unkbool;
+ 	u64 unkdouble;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+@@ -113,20 +119,23 @@
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u32 unkU32Ptr;
+ #endif
+-#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+-	u8 padding_14_7[0x234];
+-#endif
+ 	u8 swap_null;
+ 	u8 surf_null[SWAP_SURFACES];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 surf2_null[6];
++#else
+ 	u8 surf2_null[5];
+ #endif
++#endif
+ 	u8 unkoutbool_null;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u8 unkU32Ptr_null;
+ 	u8 unkU32out_null;
+ #endif
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 	u8 padding[1];
++#endif
+ } __packed;
+ 
+ struct DCP_FW_NAME(dcp_swap_submit_resp) {
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -923,7 +923,7 @@
+ 	for (int l = 0; l < SWAP_SURFACES; l++)
+ 		swap->surf_null[l] = true;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	for (int l = 0; l < 5; l++)
++	for (int l = 0; l < ARRAY_SIZE(swap->surf2_null); l++)
+ 		swap->surf2_null[l] = true;
+ 	swap->unkU32Ptr_null = true;
+ 	swap->unkU32out_null = true;
+@@ -1298,7 +1298,7 @@
+ 	for (l = 0; l < SWAP_SURFACES; l++)
+ 		req->surf_null[l] = true;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	for (l = 0; l < 5; l++)
++	for (l = 0; l < ARRAY_SIZE(req->surf2_null); l++)
+ 		req->surf2_null[l] = true;
+ 	req->unkU32Ptr_null = true;
+ 	req->unkU32out_null = true;

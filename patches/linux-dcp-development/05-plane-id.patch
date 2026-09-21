@@ -1,0 +1,37 @@
+From a4a16883ffde383feca10c7d7be55716ed8a65f3 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Sun, 26 Jul 2026 09:09:52 +1000
+Subject: [PATCH] drm: apple: Pass plane ID as IOSurface ID
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 2 ++
+ drivers/gpu/drm/apple/plane.c          | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index b4784cbbd0e637..87183fe51e7fdc 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1355,6 +1355,8 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 		req->swap.src_rect[l] = apple_state->src_rect;
+ 		req->swap.dst_rect[l] = apple_state->dst_rect;
+ 
++		req->swap.surf_ids[apl_plane->iomfb_surf] = plane->base.id;
++
+ 		if (dcp->notch_height > 0)
+ 			req->swap.dst_rect[l].y += dcp->notch_height;
+ 
+diff --git a/drivers/gpu/drm/apple/plane.c b/drivers/gpu/drm/apple/plane.c
+index aa8c8cca22d67f..f92875e63f4d01 100644
+--- a/drivers/gpu/drm/apple/plane.c
++++ b/drivers/gpu/drm/apple/plane.c
+@@ -249,7 +249,7 @@ static void apple_plane_atomic_update(struct drm_plane *plane,
+ 		.width = fb->width,
+ 		.height = fb->height,
+ 		.buf_size = fb->height * fb->pitches[0],
+-		// .surface_id = req->swap.surf_ids[l],
++		.surface_id = plane->base.id,
+ 
+ 		/* Only used for compressed or multiplanar surfaces */
+ 		.pix_size = 1,

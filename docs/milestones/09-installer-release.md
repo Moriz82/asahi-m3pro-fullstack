@@ -18,6 +18,22 @@ gate `blocked` and `hardware_acceptance=false`. Genuine native-readiness,
 backup/recovery, DFU, and dedicated-target evidence remains a future human
 gate.
 
+The canonical input validator, recovery-plan creator/verifier, and installer
+state simulator also require these **leading** arguments on every invocation:
+
+```sh
+--expected-target-identity-sha256 "$EXPECTED_TARGET_ID" \
+--target-readiness-anchors /absolute/independently-retained-m1-anchors.txt
+```
+
+They forward both explicit values through M1 handoff verification, including
+historical target/controller evidence. No environment fallback or extraction
+from a submitted bundle exists. The M9 declarative handoff-hash anchor is not a
+replacement for these independently retained M1 origin anchors. These files
+remain external to release snapshots. The standalone simulation-record checker
+still accepts only the independent release/plan digests; it verifies the record,
+not the full underlying release provenance.
+
 The command first copies the anchor and every canonical handoff to a private
 staging tree, then verifies the copied snapshots and their external hash pins.
 Only after those checks pass does it atomically publish a format-2

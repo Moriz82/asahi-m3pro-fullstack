@@ -1,0 +1,53 @@
+diff --git a/proxyclient/m1n1/hw/dart8110.py b/proxyclient/m1n1/hw/dart8110.py
+--- a/proxyclient/m1n1/hw/dart8110.py
++++ b/proxyclient/m1n1/hw/dart8110.py
+@@ -274,9 +274,10 @@
+         if size == 0:
+             return
+ 
+-        if not (self.enabled_streams & (1 << stream)):
+-            self.enabled_streams |= (1 << stream)
+-            self.regs.ENABLE_STREAMS[stream // 32].val |= (1 << (stream % 32))
++        if any(not isinstance(value, int) for value in (stream, iova, addr, size)):
++            raise TypeError("DART mapping arguments must be integers")
++        if not 0 <= stream < 256:
++            raise ValueError(f"Invalid DART stream {stream}")
+ 
+         tcr = self.regs.TCR[stream].reg
+ 
+@@ -291,6 +292,17 @@
+ 
+         if iova & (self.PAGE_SIZE - 1):
+             raise Exception(f"Unaligned IOVA {iova:#x}")
++
++        # Match the supported translation width and the 28-bit PTE page number.
++        iova_limit = 1 << (44 if tcr.FOUR_LEVELS else 36)
++        if size < 0 or iova < 0 or iova + size > iova_limit:
++            raise ValueError("DART IOVA range is not representable")
++        if addr < 0 or addr + size > (1 << 42):
++            raise ValueError("DART physical range is not representable")
++
++        if not (self.enabled_streams & (1 << stream)):
++            self.regs.ENABLE_STREAMS[stream // 32].val |= (1 << (stream % 32))
++            self.enabled_streams |= (1 << stream)
+ 
+         start_page = align_down(iova, self.PAGE_SIZE)
+         end = iova + size
+@@ -320,8 +332,6 @@
+                         OFFSET=l1addr >> self.PAGE_BITS, VALID=1)
+                     l0[l0idx] = l0pte.value
+                     dirty.add(ttbr.ADDR << self.PAGE_BITS)
+-                else:
+-                    l2addr = l1pte.OFFSET << self.PAGE_BITS
+                 l1page = l0pte.OFFSET
+             else:
+                 l1page = ttbr.ADDR
+@@ -430,7 +440,7 @@
+         ranges[-1] = (ranges[-1][0], ranges[-1][1] - self.PAGE_SIZE + end_size)
+ 
+         if start_off:
+-            ranges[0] = (ranges[0][0] + start_off if ranges[0][0] else None,
++            ranges[0] = (ranges[0][0] + start_off if ranges[0][0] is not None else None,
+                          ranges[0][1] - start_off)
+ 
+         return ranges

@@ -1,0 +1,19 @@
+Subject: [PATCH] arm64: dts: apple: use valid J514s PIODMA alias
+
+Follow Asahi m1n1 a997f4eb552beb517fa44420f8b50457fb5cd7c7.
+DT labels may contain underscores, but /aliases property names may not.
+Only the development J514s alias changes; the node label and disabled state
+remain unchanged. Requires loader alias compatibility before future use.
+
+diff --git a/arch/arm64/boot/dts/apple/t6030-display.dtsi b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+--- a/arch/arm64/boot/dts/apple/t6030-display.dtsi
++++ b/arch/arm64/boot/dts/apple/t6030-display.dtsi
+@@ -9,7 +9,7 @@
+ 	aliases {
+ 		dcp = &dcp;
+ 		disp0 = &display;
+-		disp0_piodma = &disp0_piodma;
++		disp0-piodma = &disp0_piodma;
+ 	};
+ 
+ 	/* Placeholder rates are replaced from the current boot ADT by m1n1.

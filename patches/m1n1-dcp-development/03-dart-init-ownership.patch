@@ -1,0 +1,77 @@
+Subject: [DEVELOPMENT PATCH] dart: prepare missing roots before publishing registers
+
+Track newly allocated roots separately from retained tables. If any root
+allocation fails, free only those new roots and the DART object, with no
+register writes. The previous path freed an interior pointer when unlocked,
+leaked allocated roots, and had already enabled the stream/published tables.
+
+Successful initialization retains the existing register-write order, but
+reads retained TTBRs and allocates/zeros all missing roots before that order
+begins. Locked-register semantics, TLB timeout policy and shutdown behavior
+are not changed. Hardware timing and locked TTBR acceptance remain untested.
+
+Apply after 02-dart-handoff.patch to a disposable source export only.
+Source-backed failure injection passes with ASan/UBSan. No native validation.
+Not selected by any canonical or development boot builder.
+
+--- a/src/dart.c
++++ b/src/dart.c
+@@ -226,12 +226,10 @@
+         case DART_T6000:
+             if (read32(dart->regs + DART_T8020_CONFIG) & DART_T8020_CONFIG_LOCK)
+                 dart->locked = true;
+-            set32(dart->regs + DART_T8020_ENABLED_STREAMS, BIT(device & 0x1f));
+             break;
+         case DART_T8110:
+             if (read32(dart->regs + DART_T8110_PROTECT) & DART_T8110_PROTECT_TTBR_TCR)
+                 dart->locked = true;
+-            write32(dart->regs + DART_T8110_ENABLE_STREAMS + 4 * (device >> 5), BIT(device & 0x1f));
+             break;
+     }
+ 
+@@ -246,6 +244,8 @@
+         }
+     }
+ 
++    /* Prepare all missing roots before publishing any register changes. */
++    u32 new_tables = 0;
+     for (int i = 0; i < dart->params->ttbr_count; i++) {
+         if (dart->l1[i])
+             continue;
+@@ -254,7 +254,23 @@
+         if (!dart->l1[i])
+             goto error;
+         memset(dart->l1[i], 0, SZ_16K);
++        new_tables |= BIT(i);
++    }
+ 
++    switch (type) {
++        case DART_T8020:
++        case DART_T6000:
++            set32(dart->regs + DART_T8020_ENABLED_STREAMS, BIT(device & 0x1f));
++            break;
++        case DART_T8110:
++            write32(dart->regs + DART_T8110_ENABLE_STREAMS + 4 * (device >> 5), BIT(device & 0x1f));
++            break;
++    }
++
++    for (int i = 0; i < dart->params->ttbr_count; i++) {
++        if (!(new_tables & BIT(i)))
++            continue;
++
+         write32(DART_TTBR(dart, i),
+                 dart->params->ttbr_valid |
+                     FIELD_PREP(dart->params->ttbr_addr,
+@@ -268,8 +284,9 @@
+     return dart;
+ 
+ error:
+-    if (!dart->locked)
+-        free(dart->l1);
++    for (int i = 0; i < dart->params->ttbr_count; i++)
++        if (new_tables & BIT(i))
++            free(dart->l1[i]);
+     free(dart);
+     return NULL;
+ }
+

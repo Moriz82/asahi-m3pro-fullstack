@@ -5,6 +5,7 @@ readonly project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "${project_root}/config/milestone0.env"
 source "${project_root}/scripts/lib/milestone0-output-root.sh"
 source "${project_root}/scripts/lib/milestone0-package-paths.sh"
+source "${project_root}/scripts/lib/milestone0-inspection.sh"
 if [[ "${1:-}" == --self-test ]]; then
     "${project_root}/scripts/test-linux-package-tools.sh"
     exit 0
@@ -60,7 +61,6 @@ test "$(grep -c '^arch_image_id=' "$package_root/manifest.txt")" -eq 1
 readonly arch_image_id="$(sed -n 's/^arch_image_id=//p' "$package_root/manifest.txt")"
 readonly full_image_id="$(sed -n 's/^container_image_id=//p' "$full_evidence/manifest.txt")"
 [[ $arch_image_id =~ ^sha256:[0-9a-f]{64}$ && $arch_image_id == "$full_image_id" ]]
-docker image inspect "$arch_image_id" >/dev/null
 grep -Fx 'method=native-kernel-pacman-pkg' "$package_root/manifest.txt" >/dev/null
 grep -Fx 'kernel_image_transform=gzip' "$package_root/manifest.txt" >/dev/null
 grep -Fx 'kernel_image_verification=decompressed-byte-equality' "$package_root/manifest.txt" >/dev/null
@@ -68,14 +68,7 @@ grep -Fx 'module_transform=install-mod-strip-1' "$package_root/manifest.txt" >/d
 grep -Fx 'module_metadata_policy=depmod-generated-on-install' "$package_root/manifest.txt" >/dev/null
 readonly package_root_abs="$package_root"
 readonly evidence_abs="$full_evidence"
-readonly package_paths_lib="${project_root}/scripts/lib/milestone0-package-paths.sh"
-readonly package_closure_lib="${project_root}/scripts/lib/milestone0-package-closure.sh"
-docker run --rm --env "LINUX_PKGBASE=${LINUX_PKGBASE}" --env "LINUX_PKGVER=${LINUX_PKGVER}" --env "LINUX_PKGREL=${LINUX_PKGREL}" \
-    --mount "type=bind,src=${package_root_abs},dst=/packages,readonly" \
-    --mount "type=bind,src=${evidence_abs},dst=/evidence,readonly" \
-    --mount "type=bind,src=${package_paths_lib},dst=/verify/milestone0-package-paths.sh,readonly" \
-    --mount "type=bind,src=${package_closure_lib},dst=/verify/milestone0-package-closure.sh,readonly" \
-    "$arch_image_id" bash -Eeuo pipefail -c '
+m0_inspection_run "$evidence_abs" "$package_root_abs" "$arch_image_id" '
         source /verify/milestone0-package-paths.sh
         source /verify/milestone0-package-closure.sh
         mapfile -t packages < <(find /packages -maxdepth 1 -type f -name "*.pkg.tar.zst" -print | sort)

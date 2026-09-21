@@ -1,0 +1,815 @@
+diff --git a/src/afk.c b/src/afk.c
+index e4190ac..5be056c 100644
+--- a/src/afk.c
++++ b/src/afk.c
+@@ -19,6 +19,7 @@ struct afk_rb {
+     size_t block_size;
+     size_t base, size;
+     u32 pending_rptr, next_rptr;
++    u32 pending_size;
+ };
+ 
+ enum EPICType {
+@@ -104,6 +105,9 @@ struct afk_epic_ep {
+     bool started;
+     bool start_requested;
+     u16 seq;
++    u16 command_seq;
++    /* Remains set after an uncertain completion; OOL buffers must not be reused. */
++    bool command_pending;
+ 
+     u32 num_channels;
+ 
+@@ -300,7 +304,7 @@ static int afk_epic_poll(afk_epic_t *afk, int endpoint, bool block)
+             if (rptr != wptr) {
+                 if (endpoint == epic->ep)
+                     return EPIC_DATA_READY;
+-                else if (epic->recv_handler)
++                else if (!epic->command_pending && epic->recv_handler)
+                     epic->recv_handler(epic);
+                 if (rb->failed)
+                     return -1;
+@@ -360,6 +364,7 @@ static int afk_epic_rx(afk_epic_ep_t *epic, struct afk_qe **qe)
+ 
+     rb->pending_rptr = rptr;
+     rb->next_rptr = next;
++    rb->pending_size = snapshot.size;
+     rb->pending = true;
+     *qe = hdr;
+     return 1;
+@@ -450,10 +455,57 @@ static void afk_epic_rx_ack(afk_epic_ep_t *epic)
+     rb->pending = false;
+ }
+ 
++/* Copy before ACK: callbacks may poll again and firmware may immediately recycle
++ * the shared ring. This copy remains owned by the caller until free(). */
++static int afk_epic_read(afk_epic_ep_t *epic, struct afk_qe **message)
++{
++    struct afk_qe *shared;
++    *message = NULL;
++    if (afk_epic_rx(epic, &shared) < 0)
++        return -1;
++
++    u32 size = epic->rx.pending_size;
++    struct afk_qe *copy = malloc(sizeof(*copy) + size);
++    if (!copy) {
++        epic->rx.failed = true;
++        return -1;
++    }
++    memcpy(copy, shared, sizeof(*copy) + size);
++    if (copy->magic != QE_MAGIC || copy->size != size) {
++        epic->rx.failed = true;
++        free(copy);
++        return -1;
++    }
++
++    afk_epic_rx_ack(epic);
++    if (epic->rx.failed) {
++        free(copy);
++        return -1;
++    }
++    *message = copy;
++    return 0;
++}
++
++static bool afk_epic_decode(struct afk_qe *message, struct epic_sub_hdr **sub, void **payload)
++{
++    if (message->size < sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr))
++        return false;
++    struct epic_hdr *hdr = (void *)message->data;
++    *sub = (void *)(hdr + 1);
++    if (hdr->version != 2 || (*sub)->version != 4 ||
++        (*sub)->length > message->size - sizeof(*hdr) - sizeof(**sub) ||
++        (*sub)->inline_len > (*sub)->length)
++        return false;
++    *payload = *sub + 1;
++    return true;
++}
++
+ int afk_epic_work(afk_epic_t *afk, int endpoint)
+ {
+     int i = 0;
++    unsigned messages = 0;
+ 
++    /* Yield to caller deadlines even while unrelated mailbox traffic continues. */
+     while (i < 0x10) {
+         afk_epic_ep_t *cur = afk->endpoint[i++];
+         if (cur) {
+@@ -463,7 +515,8 @@ int afk_epic_work(afk_epic_t *afk, int endpoint)
+                 return -1;
+             if (rb->ready && !afk_rb_positions(rb, &rptr, &wptr))
+                 return -1;
+-            if (rptr != wptr) {
++            /* A waiting command owns its endpoint's RX stream. */
++            if (rptr != wptr && (!cur->command_pending || cur->ep == endpoint)) {
+                 if (cur->ep == endpoint) {
+                     return EPIC_DATA_READY;
+                 }
+@@ -483,7 +536,8 @@ int afk_epic_work(afk_epic_t *afk, int endpoint)
+                     return -1;
+             }
+         }
+-        if (rtkit_can_recv(afk->rtk)) {
++        if (messages < 0x10 && rtkit_can_recv(afk->rtk)) {
++            messages++;
+             int ret = afk_epic_poll(afk, endpoint, false);
+             if (ret < 0 || ret == EPIC_DATA_READY)
+                 return ret;
+@@ -517,64 +571,42 @@ static int afk_epic_handle_std_service(afk_epic_ep_t *epic, int channel, u8 cate
+                                        void *payload, size_t payload_size)
+ {
+     afk_epic_service_t *service = afk_epic_find_service(epic, channel);
++    struct epic_std_service_ap_call *call = payload;
++    size_t headers = sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr);
+ 
+-    if (service && service->ops->call && category == CAT_NOTIFY) {
+-        struct epic_std_service_ap_call *call = payload;
+-        size_t call_size;
+-        void *reply;
+-        int ret;
+-
+-        if (payload_size < sizeof(*call))
+-            return -1;
+-
+-        call_size = call->len;
+-        if (payload_size < sizeof(*call) + call_size)
+-            return -1;
+-
+-        if (!service->ops->call)
+-            return 0;
+-        reply = calloc(payload_size, 1);
+-        if (!reply)
+-            return -1;
+-
+-        ret = service->ops->call(service, call->type, payload + sizeof(*call), call_size,
+-                                 reply + sizeof(*call), call_size);
+-        if (ret) {
+-            free(reply);
+-            return ret;
+-        }
+-
+-        memcpy(reply, call, sizeof(*call));
+-
+-        size_t tx_size = sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr) + payload_size;
+-        void *msg = calloc(tx_size, 1);
+-
+-        struct epic_hdr *hdr = msg;
+-        struct epic_sub_hdr *sub = msg + sizeof(struct epic_hdr);
+-
+-        hdr->version = 2;
+-        hdr->seq = epic->seq++;
+-
+-        sub->length = payload_size;
+-        sub->version = 4;
+-        sub->category = CAT_REPLY;
+-        sub->type = SUBTYPE_STD_SERVICE;
+-        sub->seq = sub_seq; // service->seq++;
+-        sub->flags = 0x08;
+-        sub->inline_len = payload_size - 4;
+-
+-        memcpy(msg + sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr), reply, payload_size);
+-
+-        afk_epic_tx(epic, channel, TYPE_NOTIFY_ACK, msg, tx_size);
+-        free(reply);
+-        free(msg);
+-
+-        return 0;
+-    }
++    if (!service || !service->ops || !service->ops->call || category != CAT_NOTIFY)
++        return -1;
++    if (!payload || payload_size < sizeof(*call) || payload_size > (u32)-1 - headers ||
++        call->len > payload_size - sizeof(*call))
++        return -1;
+ 
+-    dprintf("AFK: channel %d received unhandled standard service message: %x\n", channel, category);
++    size_t tx_size = headers + payload_size;
++    void *msg = calloc(1, tx_size);
++    if (!msg)
++        return -1;
+ 
+-    return -1;
++    struct epic_hdr *hdr = msg;
++    struct epic_sub_hdr *sub = (void *)(hdr + 1);
++    void *reply = sub + 1;
++    memcpy(reply, call, sizeof(*call));
++    int ret = service->ops->call(service, call->type, payload + sizeof(*call), call->len,
++                                reply + sizeof(*call), call->len);
++    if (ret)
++        goto out;
++
++    hdr->version = 2;
++    hdr->seq = epic->seq++;
++    sub->length = payload_size;
++    sub->version = 4;
++    sub->category = CAT_REPLY;
++    sub->type = SUBTYPE_STD_SERVICE;
++    sub->seq = sub_seq;
++    sub->flags = 0x08;
++    sub->inline_len = payload_size - 4;
++    ret = afk_epic_tx(epic, channel, TYPE_NOTIFY_ACK, msg, tx_size) < 0 ? -1 : 0;
++out:
++    free(msg);
++    return ret;
+ }
+ 
+ int afk_epic_command(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf, size_t txsize,
+@@ -585,122 +617,133 @@ int afk_epic_command(afk_epic_ep_t *epic, int channel, u16 sub_type, void *txbuf
+         struct epic_sub_hdr sub;
+         struct epic_cmd cmd;
+     } PACKED msg;
++    size_t rxmax = rxsize ? *rxsize : 0;
+ 
+-    assert(txsize <= epic->txbuf.sz);
+-    assert(!rxsize || *rxsize <= epic->rxbuf.sz);
++    if (!epic || !epic->afk || channel < 0 || epic->command_pending ||
++        !epic->txbuf.bfr || !epic->rxbuf.bfr || (txsize && !txbuf) || (rxmax && !rxbuf) ||
++        txsize > epic->txbuf.sz || txsize > (u32)-1 ||
++        rxmax > epic->rxbuf.sz || rxmax > (u32)-1)
++        return -1;
+ 
++    epic->command_pending = true;
+     memset(&msg, 0, sizeof(msg));
+-
+     msg.hdr.version = 2;
+     msg.hdr.seq = epic->seq++;
+     msg.sub.length = sizeof(msg.cmd);
+     msg.sub.version = 4;
+     msg.sub.category = CAT_COMMAND;
+     msg.sub.type = sub_type;
+-    msg.sub.seq = 0;
++    msg.sub.seq = epic->command_seq++;
+     msg.cmd.txbuf = epic->txbuf.dva;
+     msg.cmd.txlen = txsize;
+     msg.cmd.rxbuf = epic->rxbuf.dva;
+-    msg.cmd.rxlen = rxsize ? *rxsize : 0;
+-
+-    memcpy(epic->txbuf.bfr, txbuf, txsize);
++    msg.cmd.rxlen = rxmax;
++    if (txsize)
++        memcpy(epic->txbuf.bfr, txbuf, txsize);
+ 
+-    int ret = afk_epic_tx(epic, channel, TYPE_COMMAND, &msg, sizeof msg);
++    int ret = afk_epic_tx(epic, channel, TYPE_COMMAND, &msg, sizeof(msg));
+     if (ret < 0) {
+-        printf("EPIC: failed to transmit command\n");
++        /* A capacity failure did not publish; a failed send may have. */
++        if (!epic->tx.failed)
++            epic->command_pending = false;
+         return ret;
+     }
+ 
+-    struct afk_qe *rmsg;
+-    struct epic_cmd *rcmd;
+-
+-    while (true) {
++    u64 timeout = timeout_calculate(1000000);
++    while (!timeout_expired(timeout)) {
+         ret = afk_epic_work(epic->afk, epic->ep);
+         if (ret < 0)
+             return ret;
+-        else if (ret != EPIC_DATA_READY)
++        if (ret != EPIC_DATA_READY)
+             continue;
+-        // will not block
+-        ret = afk_epic_rx(epic, &rmsg);
+-        if (ret < 0)
+-            return ret;
+ 
++        struct afk_qe *rmsg;
++        if (afk_epic_read(epic, &rmsg) < 0)
++            return -1;
+         if (rmsg->type != TYPE_REPLY && rmsg->type != TYPE_NOTIFY) {
+-            printf("EPIC: got unexpected message type %d during command\n", rmsg->type);
+-            afk_epic_rx_ack(epic);
++            free(rmsg);
+             continue;
+         }
+ 
+-        struct epic_hdr *hdr = (void *)(rmsg + 1);
+-        struct epic_sub_hdr *sub = (void *)(hdr + 1);
+-
+-        if (sub->category == CAT_NOTIFY && sub->type == SUBTYPE_STD_SERVICE) {
+-            void *payload = rmsg->data + sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr);
+-            size_t payload_size =
+-                rmsg->size - sizeof(struct epic_hdr) - sizeof(struct epic_sub_hdr);
+-            afk_epic_rx_ack(epic);
+-            afk_epic_handle_std_service(epic, channel, sub->category, sub->seq, payload,
+-                                        payload_size);
++        struct epic_sub_hdr *sub;
++        void *payload;
++        if (!afk_epic_decode(rmsg, &sub, &payload)) {
++            epic->rx.failed = true;
++            free(rmsg);
++            return -1;
++        }
++        if (rmsg->type == TYPE_NOTIFY && sub->category == CAT_NOTIFY &&
++            sub->type == SUBTYPE_STD_SERVICE) {
++            ret = afk_epic_handle_std_service(epic, rmsg->channel, sub->category, sub->seq,
++                                             payload, sub->length);
++            free(rmsg);
++            if (ret)
++                return ret;
+             continue;
+-        } else if (sub->category != CAT_REPLY || sub->type != sub_type) {
+-            printf("EPIC: got unexpected message %02x:%04x during command\n", sub->category,
+-                   sub->type);
+-            afk_epic_rx_ack(epic);
++        }
++        if (rmsg->type != TYPE_REPLY || rmsg->channel != (u32)channel ||
++            sub->category != CAT_REPLY || sub->type != sub_type || sub->seq != msg.sub.seq) {
++            free(rmsg);
+             continue;
+         }
+ 
+-        rcmd = (void *)(sub + 1);
+-        break;
+-    }
+-
+-    if (rcmd->retcode != 0) {
+-        printf("EPIC: IOP returned 0x%x\n", rcmd->retcode);
+-        afk_epic_rx_ack(epic);
+-        return rcmd->retcode; // should be negative already
+-    }
+-
+-    if (rxsize) {
+-        assert(*rxsize >= rcmd->rxlen);
+-        *rxsize = rcmd->rxlen;
++        /* Status-only replies need four bytes. Command descriptors may omit
++         * the two trailing cookies, but all fields read below must be present. */
++        struct epic_cmd response = {0};
++        if (sub->length < sizeof(response.retcode))
++            goto malformed;
++        memcpy(&response.retcode, payload, sizeof(response.retcode));
++        if (response.retcode) {
++            ret = response.retcode;
++        } else if (sub->length == sizeof(response.retcode) && !rxmax) {
++            if (rxsize)
++                *rxsize = 0;
++            ret = 0;
++        } else {
++            if (sub->length < offsetof(struct epic_cmd, rxcookie))
++                goto malformed;
++            memcpy(&response, payload, offsetof(struct epic_cmd, rxcookie));
++            if (response.rxlen > rxmax || response.rxlen > epic->rxbuf.sz ||
++                (response.rxlen && response.rxbuf != epic->rxbuf.dva))
++                goto malformed;
++            dma_rmb();
++            if (response.rxlen)
++                memcpy(rxbuf, epic->rxbuf.bfr, response.rxlen);
++            if (rxsize)
++                *rxsize = response.rxlen;
++            ret = 0;
++        }
++        epic->command_pending = false;
++        free(rmsg);
++        return ret;
+ 
+-        if (*rxsize && rcmd->rxbuf)
+-            memcpy(rxbuf, epic->rxbuf.bfr, *rxsize);
++malformed:
++        printf("EPIC: malformed command reply\n");
++        epic->rx.failed = true;
++        free(rmsg);
++        return -1;
+     }
+-
+-    afk_epic_rx_ack(epic);
+-
+-    return 0;
++    printf("EPIC: command timed out; buffers remain reserved\n");
++    return -1;
+ }
+ 
+ static void afk_epic_notify_handler(afk_epic_ep_t *epic)
+ {
+-    struct afk_qe *rmsg;
+-    // will not block
+-    int ret = afk_epic_rx(epic, &rmsg);
+-    if (ret < 0)
++    struct afk_qe *message;
++    if (afk_epic_read(epic, &message) < 0)
+         return;
+-
+-    if (rmsg->type != TYPE_NOTIFY) {
+-        dprintf("EPIC[0x%02x]: got unexpected message type %d in %s\n", epic->ep, rmsg->type,
+-                __func__);
+-        afk_epic_rx_ack(epic);
+-        return;
+-    }
+-
+-    struct epic_hdr *hdr = (void *)(rmsg + 1);
+-    struct epic_sub_hdr *sub = (void *)(hdr + 1);
+-
+-    if (sub->category == CAT_NOTIFY && sub->type == SUBTYPE_STD_SERVICE) {
+-        void *payload = rmsg->data + sizeof(struct epic_hdr) + sizeof(struct epic_sub_hdr);
+-        size_t payload_size = rmsg->size - sizeof(struct epic_hdr) - sizeof(struct epic_sub_hdr);
+-        afk_epic_handle_std_service(epic, rmsg->channel, sub->category, sub->seq, payload,
+-                                    payload_size);
+-    } else {
+-        dprintf("EPIC[0x%02x]: %s: rx: Ch %u, Type:0x%02x sub cat:%x type:%x \n", epic->ep,
+-                __func__, rmsg->channel, rmsg->type, sub->category, sub->type);
++    if (message->type == TYPE_NOTIFY) {
++        struct epic_sub_hdr *sub;
++        void *payload;
++        if (!afk_epic_decode(message, &sub, &payload)) {
++            epic->rx.failed = true;
++        } else if (sub->category == CAT_NOTIFY && sub->type == SUBTYPE_STD_SERVICE) {
++            if (afk_epic_handle_std_service(epic, message->channel, sub->category, sub->seq,
++                                            payload, sub->length))
++                epic->rx.failed = true;
++        }
+     }
+-
+-    afk_epic_rx_ack(epic);
++    free(message);
+ }
+ 
+ afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_service_ops_t *ops,
+@@ -773,7 +816,7 @@ static const afk_epic_service_ops_t *afk_match_service(afk_epic_ep_t *ep, const
+ {
+     const afk_epic_service_ops_t *ops;
+ 
+-    if (!name[0])
++    if (!name || !name[0])
+         return NULL;
+     if (!ep->ops)
+         return NULL;
+@@ -791,83 +834,61 @@ static const afk_epic_service_ops_t *afk_match_service(afk_epic_ep_t *ep, const
+ int afk_epic_start_interface(afk_epic_ep_t *epic, void *intf, int expected, size_t txsize,
+                              size_t rxsize)
+ {
+-    int services = 0;
+-    struct afk_qe *msg;
+-    struct epic_announce *announce;
+-
+-    /* consume messages for other endpoints, syslog or ioreport might be noisy
+-     * at startup */
+-    while (1) {
+-        int ret = afk_epic_work(epic->afk, epic->ep);
+-        if (ret < 0)
+-            return ret;
+-        if (ret == EPIC_DATA_READY)
+-            break;
+-    }
++    if (!epic || expected <= 0 || epic->num_channels > AFK_MAX_CHANNEL ||
++        (u32)expected > AFK_MAX_CHANNEL - epic->num_channels || !txsize || !rxsize ||
++        txsize > (u32)-1 || rxsize > (u32)-1 || epic->txbuf.bfr || epic->rxbuf.bfr)
++        return -1;
+ 
++    int services = 0;
++    /* Include the first message in the deadline, not an unbounded initial wait. */
+     u64 timeout = timeout_calculate(500000);
+-
+     while (!timeout_expired(timeout)) {
+-        s64 epic_unit = -1;
+-        char *epic_name = NULL;
+-        char *epic_class = NULL;
+-        const char *service_name = NULL;
+-
+         int ret = afk_epic_work(epic->afk, epic->ep);
+         if (ret < 0)
+             return ret;
+-        else if (ret != EPIC_DATA_READY)
++        if (ret != EPIC_DATA_READY)
+             continue;
+ 
+-        ret = afk_epic_rx(epic, &msg);
+-        if (ret < 0)
+-            return ret;
+-
+-        if (msg->type != TYPE_NOTIFY && msg->type != TYPE_REPLY) {
+-            dprintf("AFK[ep:%02x]: got unexpected message type %d during iface start\n", epic->ep,
+-                    msg->type);
+-            afk_epic_rx_ack(epic);
+-            continue;
++        struct afk_qe *message;
++        if (afk_epic_read(epic, &message) < 0)
++            return -1;
++        char *epic_name = NULL, *epic_class = NULL;
++        s64 epic_unit = -1;
++        const char *service_name;
++        if (message->type != TYPE_NOTIFY && message->type != TYPE_REPLY)
++            goto next;
++
++        struct epic_sub_hdr *sub;
++        void *payload;
++        if (!afk_epic_decode(message, &sub, &payload)) {
++            epic->rx.failed = true;
++            free(message);
++            return -1;
+         }
+-
+-        struct epic_hdr *hdr = (void *)(msg + 1);
+-        struct epic_sub_hdr *sub = (void *)(hdr + 1);
+-
+-        if (sub->category != CAT_REPORT || sub->type != SUBTYPE_ANNOUNCE) {
+-            dprintf("AFK[ep:%02x]: got unexpected message %02x:%04x during iface start\n", epic->ep,
+-                    sub->category, sub->type);
+-            afk_epic_rx_ack(epic);
+-            continue;
++        if (sub->category != CAT_REPORT || sub->type != SUBTYPE_ANNOUNCE)
++            goto next;
++        if (sub->length < sizeof(struct epic_announce)) {
++            epic->rx.failed = true;
++            free(message);
++            return -1;
+         }
+-
+-        if (epic->num_channels >= AFK_MAX_CHANNEL) {
+-            printf("AFK[ep:%02x]: Out of free service for service on channel %d\n", epic->ep,
+-                   msg->channel);
+-            afk_epic_rx_ack(epic);
+-            continue;
++        struct epic_announce *announce = payload;
++        if (!memchr(announce->name, 0, sizeof(announce->name))) {
++            epic->rx.failed = true;
++            free(message);
++            return -1;
+         }
++        if (epic->num_channels >= AFK_MAX_CHANNEL ||
++            afk_epic_find_service(epic, message->channel))
++            goto next;
+ 
+-        announce = (void *)(sub + 1);
+-
+-        size_t props_size = sub->length - offsetof(struct epic_announce, props);
+-
++        size_t props_size = sub->length - sizeof(*announce);
+         if (props_size > 36) {
+             struct dcp_parse_ctx ctx;
+-
+-            int ret = parse(announce->props, props_size, &ctx);
+-            if (ret) {
+-                printf("AFK[ep:%02x]: Failed to parse service init props (len=%zu) for %s\n",
+-                       epic->ep, props_size, announce->name);
+-                afk_epic_rx_ack(epic);
+-                continue;
+-            }
+-            ret = parse_epic_service_init(&ctx, &epic_name, &epic_class, &epic_unit);
+-            if (ret) {
+-                printf("AFK[ep:%02x]: failed to extract init props (len=%zu): %d\n", epic->ep,
+-                       props_size, ret);
+-                hexdump(announce->props, props_size);
+-                afk_epic_rx_ack(epic);
+-                continue;
++            if (parse(announce->props, props_size, &ctx) ||
++                parse_epic_service_init(&ctx, &epic_name, &epic_class, &epic_unit)) {
++                printf("AFK[ep:%02x]: invalid service properties\n", epic->ep);
++                goto next;
+             }
+             service_name = epic_class;
+         } else {
+@@ -875,49 +896,32 @@ int afk_epic_start_interface(afk_epic_ep_t *epic, void *intf, int expected, size
+         }
+ 
+         const afk_epic_service_ops_t *ops = afk_match_service(epic, service_name);
+-        if (!ops) {
+-            printf("AFK[ep:%02x]: unable to match service %s on channel %d\n", epic->ep,
+-                   service_name, msg->channel);
+-            afk_epic_rx_ack(epic);
+-            continue;
+-        }
+-
++        if (!ops || !ops->init)
++            goto next;
+         afk_epic_service_t *service = &epic->services[epic->num_channels++];
+-        service->enabled = true;
+-        service->ops = ops;
+-        service->intf = intf;
+-        service->epic = epic;
+-        service->channel = msg->channel;
+-        service->seq = 0;
+-
++        *service = (afk_epic_service_t){.enabled = true, .ops = ops, .intf = intf,
++                                      .epic = epic, .channel = message->channel};
+         ops->init(service, epic_name, service_name, epic_unit);
+-        dprintf("AFK[ep:%02x]: new service %s on channel %d\n", epic->ep, service_name,
+-                msg->channel);
++        services++;
++next:
+         free(epic_name);
+         free(epic_class);
+-
+-        afk_epic_rx_ack(epic);
+-        if (++services >= expected)
++        free(message);
++        if (services == expected)
+             break;
+     }
+ 
+-    if (!services) {
+-        printf("AFK[ep:%02x]: too many unexpected messages, giving up\n", epic->ep);
++    if (services != expected) {
++        printf("AFK[ep:%02x]: incomplete service discovery\n", epic->ep);
+         return -1;
+     }
+-
+-    if (!rtkit_alloc_buffer(epic->afk->rtk, &epic->rxbuf, rxsize)) {
+-        printf("AFK[ep:%02x]: failed to allocate rx buffer\n", epic->ep);
++    if (!rtkit_alloc_buffer(epic->afk->rtk, &epic->rxbuf, rxsize))
+         return -1;
+-    }
+-
+     if (!rtkit_alloc_buffer(epic->afk->rtk, &epic->txbuf, txsize)) {
+-        printf("AFK[ep:%02x]: failed to allocate tx buffer\n", epic->ep);
++        rtkit_free_buffer(epic->afk->rtk, &epic->rxbuf);
+         return -1;
+     }
+-
+     dprintf("AFK[ep:%02x]: started interface with %d services\n", epic->ep, services);
+-
+     return 0;
+ }
+ 
+diff --git a/src/dcp/parser.c b/src/dcp/parser.c
+index 68bfb89..4f4d7c4 100644
+--- a/src/dcp/parser.c
++++ b/src/dcp/parser.c
+@@ -23,15 +23,14 @@ struct dcp_parse_tag {
+     enum dcp_parse_type type : 5;
+     unsigned int padding : 2;
+     bool last : 1;
+-} __packed;
++} PACKED;
+ 
+ static void *parse_bytes(struct dcp_parse_ctx *ctx, size_t count)
+ {
+-    void *ptr = ctx->blob + ctx->pos;
+-
+-    if (ctx->pos + count > ctx->len)
++    if (!ctx->blob || ctx->pos > ctx->len || count > ctx->len - ctx->pos)
+         return NULL;
+ 
++    void *ptr = ctx->blob + ctx->pos;
+     ctx->pos += count;
+     return ptr;
+ }
+@@ -46,7 +45,8 @@ static struct dcp_parse_tag *parse_tag(struct dcp_parse_ctx *ctx)
+     struct dcp_parse_tag *tag;
+ 
+     /* Align to 32-bits */
+-    ctx->pos = ALIGN_UP(ctx->pos, 4);
++    if (!parse_bytes(ctx, (-ctx->pos) & 3))
++        return NULL;
+ 
+     tag = parse_bytes(ctx, sizeof(struct dcp_parse_tag));
+ 
+@@ -72,38 +72,36 @@ static struct dcp_parse_tag *parse_tag_of_type(struct dcp_parse_ctx *ctx, enum d
+     return tag;
+ }
+ 
+-static int skip(struct dcp_parse_ctx *handle)
++static int skip_depth(struct dcp_parse_ctx *handle, unsigned depth)
+ {
++    /* Bound both stack use and work for unrecognized nested properties. */
++    if (depth >= 32)
++        return -1;
+     struct dcp_parse_tag *tag = parse_tag(handle);
+-    int ret = 0;
+-    int i;
+ 
+     if (!tag)
+         return -1;
+ 
+     switch (tag->type) {
+         case DCP_TYPE_DICTIONARY:
+-            for (i = 0; i < tag->size; ++i) {
+-                ret |= skip(handle); /* key */
+-                ret |= skip(handle); /* value */
+-            }
+-
+-            return ret;
+-
+         case DCP_TYPE_ARRAY:
+-            for (i = 0; i < tag->size; ++i)
+-                ret |= skip(handle);
+-
+-            return ret;
++            if (tag->size > (handle->len - handle->pos) /
++                (sizeof(*tag) * (tag->type == DCP_TYPE_DICTIONARY ? 2 : 1)))
++                return -1;
++            for (u32 i = 0; i < tag->size; ++i) {
++                if (skip_depth(handle, depth + 1))
++                    return -1;
++                if (tag->type == DCP_TYPE_DICTIONARY && skip_depth(handle, depth + 1))
++                    return -1;
++            }
++            return 0;
+ 
+         case DCP_TYPE_INT64:
+-            handle->pos += sizeof(s64);
+-            return 0;
++            return parse_bytes(handle, sizeof(s64)) ? 0 : -1;
+ 
+         case DCP_TYPE_STRING:
+         case DCP_TYPE_BLOB:
+-            handle->pos += tag->size;
+-            return 0;
++            return parse_bytes(handle, tag->size) ? 0 : -1;
+ 
+         case DCP_TYPE_BOOL:
+             return 0;
+@@ -128,6 +126,8 @@ static char *parse_string(struct dcp_parse_ctx *handle)
+         return NULL;
+ 
+     out = calloc(tag->size + 1, 1);
++    if (!out)
++        return NULL;
+ 
+     memcpy(out, in, tag->size);
+     out[tag->size] = '\0';
+@@ -181,6 +181,8 @@ static int iterator_begin(struct dcp_parse_ctx *handle, struct iterator *it, boo
+     if (!tag)
+         return -1;
+ 
++    if (tag->size > (handle->len - handle->pos) / (sizeof(*tag) * (dict ? 2 : 1)))
++        return -1;
+     it->len = tag->size;
+     return 0;
+ }
+@@ -193,6 +195,8 @@ static int iterator_begin(struct dcp_parse_ctx *handle, struct iterator *it, boo
+ int parse(void *blob, size_t size, struct dcp_parse_ctx *ctx)
+ {
+     u32 *header;
++    if (!ctx || !blob || size > (u32)-1)
++        return -1;
+ 
+     *ctx = (struct dcp_parse_ctx){
+         .blob = blob,
+@@ -204,7 +208,9 @@ int parse(void *blob, size_t size, struct dcp_parse_ctx *ctx)
+     if (!header)
+         return -1;
+ 
+-    if (*header != DCP_PARSE_HEADER)
++    u32 value;
++    memcpy(&value, header, sizeof(value));
++    if (value != DCP_PARSE_HEADER)
+         return -1;
+ 
+     return 0;
+@@ -217,11 +223,14 @@ int parse_epic_service_init(struct dcp_parse_ctx *handle, char **name, char **cl
+     bool parsed_unit = false;
+     bool parsed_name = false;
+     bool parsed_class = false;
++    s64 parsed_value = 0;
+ 
+     *name = NULL;
+     *class = NULL;
+ 
+-    dcp_parse_foreach_in_dict(handle, it)
++    if (iterator_begin(handle, &it, true))
++        return -1;
++    for (; it.idx < it.len; ++it.idx)
+     {
+         char *key = parse_string(it.handle);
+ 
+@@ -231,23 +240,38 @@ int parse_epic_service_init(struct dcp_parse_ctx *handle, char **name, char **cl
+         }
+ 
+         if (!strcmp(key, "EPICName")) {
++            if (parsed_name) {
++                free(key);
++                ret = -1;
++                break;
++            }
+             *name = parse_string(it.handle);
+             if (!*name)
+                 ret = -1;
+             else
+                 parsed_name = true;
+         } else if (!strcmp(key, "EPICProviderClass")) {
++            if (parsed_class) {
++                free(key);
++                ret = -1;
++                break;
++            }
+             *class = parse_string(it.handle);
+             if (!*class)
+                 ret = -1;
+             else
+                 parsed_class = true;
+         } else if (!strcmp(key, "EPICUnit")) {
+-            ret = parse_int(it.handle, unit);
++            if (parsed_unit) {
++                free(key);
++                ret = -1;
++                break;
++            }
++            ret = parse_int(it.handle, &parsed_value);
+             if (!ret)
+                 parsed_unit = true;
+         } else {
+-            skip(it.handle);
++            ret = skip_depth(it.handle, 0);
+         }
+ 
+         free(key);
+@@ -267,6 +291,8 @@ int parse_epic_service_init(struct dcp_parse_ctx *handle, char **name, char **cl
+             free(*class);
+             *class = NULL;
+         }
++    } else {
++        *unit = parsed_value;
+     }
+ 
+     return ret;

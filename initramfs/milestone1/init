@@ -5,6 +5,9 @@ PATH=/bin:/sbin
 export PATH
 LOG=/run/milestone1/session.log
 gate_failed=false
+# /run hides its old contents when mounted. Create the log only afterwards.
+mkdir -p /run
+mount -t tmpfs tmpfs /run 2>/dev/null || gate_failed=true
 mkdir -p /run/milestone1
 touch "$LOG"
 
@@ -18,14 +21,16 @@ mount_ram() {
 	mountpoint="$1"
 	fstype="$2"
 	mkdir -p "$mountpoint"
-	mount -t "$fstype" "$fstype" "$mountpoint" 2>/dev/null || log "mount_failed type=$fstype path=$mountpoint"
+	if ! mount -t "$fstype" "$fstype" "$mountpoint" 2>/dev/null; then
+		log "mount_failed type=$fstype path=$mountpoint"
+		gate_failed=true
+	fi
 }
 
+if [ "$gate_failed" = true ]; then log 'mount_failed type=tmpfs path=/run'; fi
 mount_ram /proc proc
 mount_ram /sys sysfs
-mount_ram /run tmpfs
-mkdir -p /dev
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || log 'mount_failed type=devtmpfs path=/dev'
+mount_ram /dev devtmpfs
 
 log 'phase=initramfs-start storage_policy=ram-only'
 log "uname=$(uname -a 2>/dev/null || printf unknown)"
@@ -40,26 +45,68 @@ if [ -r /proc/cmdline ]; then
 		*NVMe*|*nvme*|*APFS*|*apfs*) log 'gate_failed=forbidden-persistent-storage-parameter'; gate_failed=true ;;
 		*) ;;
 	esac
+else
+	log 'gate_failed=missing-command-line'
+	gate_failed=true
 fi
-
-if [ "$gate_failed" = true ]; then
-	log 'phase=safe-halt reason=forbidden-command-line'
-	while :; do sleep 1; done
-fi
-
-if command -v dmesg >/dev/null 2>&1; then
-	dmesg > /run/milestone1/dmesg-start.log 2>&1 || true
-fi
-log 'phase=controlled-tether-ready action=none'
-log 'safe-test-preparation=watchdog/panic/reboot are observation-only; no fault is triggered'
 
 case "${M1_TEST_ACTION:-none}" in
 	none) ;;
 	prepare-watchdog) log 'prepared=watchdog observation; operator must trigger externally' ;;
 	prepare-panic) log 'prepared=panic observation; operator must trigger externally' ;;
 	prepare-reboot) log 'prepared=reboot observation; operator must trigger externally' ;;
-	*) log 'gate_failed=unknown-test-action' ;;
+	*) log 'gate_failed=unknown-test-action'; gate_failed=true ;;
 esac
+
+if [ "$gate_failed" = true ]; then
+	log 'phase=safe-halt reason=init-or-command-line-gate'
+	while :; do sleep 1; done
+fi
+
+diagnostic_file() {
+	diagnostic_name="$1"
+	diagnostic_source="$2"
+	if [ ! -r "$diagnostic_source" ]; then
+		log "diagnostic name=$diagnostic_name status=unavailable"
+		return
+	fi
+	diagnostic_status=0
+	timeout 2 head -c 65536 "$diagnostic_source" > /run/milestone1/diagnostic.tmp 2>&1 || diagnostic_status=$?
+	log "diagnostic-begin name=$diagnostic_name status=$diagnostic_status limit_bytes=65536 completeness=not-assessed"
+	cat /run/milestone1/diagnostic.tmp >>"$LOG"
+	cat /run/milestone1/diagnostic.tmp >/dev/console 2>/dev/null || true
+	printf '\n' >>"$LOG"
+	printf '\n' >/dev/console 2>/dev/null || true
+	log "diagnostic-end name=$diagnostic_name"
+}
+
+# Cached kernel metadata only. No sysfs writes, device probes, mounts, stress,
+# suspend, watchdog, panic, reboot or hardware-specific command is performed.
+log 'phase=diagnostics-start scope=read-only-kernel-metadata'
+for diagnostic_proc in version meminfo uptime stat interrupts modules mounts devices iomem; do
+	diagnostic_file "$diagnostic_proc" "/proc/$diagnostic_proc"
+done
+diagnostic_file cpu-online /sys/devices/system/cpu/online
+diagnostic_file cpu-possible /sys/devices/system/cpu/possible
+if command -v dmesg >/dev/null 2>&1; then
+	dmesg_capture_status=0
+	# Bound at collection, not only at console emission. Record the producer's
+	# status separately because POSIX sh reports only the last pipeline status.
+	(
+		dmesg_producer_status=0
+		timeout 3 dmesg 2>&1 || dmesg_producer_status=$?
+		printf '%s\n' "$dmesg_producer_status" > /run/milestone1/dmesg.status
+	) | head -c 65536 > /run/milestone1/dmesg-start.log || dmesg_capture_status=$?
+	dmesg_status=unavailable
+	if [ -r /run/milestone1/dmesg.status ]; then
+		read -r dmesg_status < /run/milestone1/dmesg.status || dmesg_status=unavailable
+	fi
+	log "diagnostic name=dmesg-command status=$dmesg_status capture_status=$dmesg_capture_status limit_bytes=65536"
+	diagnostic_file dmesg /run/milestone1/dmesg-start.log
+fi
+log 'phase=diagnostics-end hardware_acceptance=false'
+log 'phase=controlled-tether-ready action=none'
+log 'safe-test-preparation=watchdog/panic/reboot are observation-only; no fault is triggered'
 
 while :; do
 	sleep 1

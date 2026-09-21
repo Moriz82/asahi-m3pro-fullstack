@@ -1,0 +1,1424 @@
+diff --git a/src/dart.c b/src/dart.c
+index eccb134..d904657 100644
+--- a/src/dart.c
++++ b/src/dart.c
+@@ -114,7 +114,15 @@ struct dart_params {
+     u64 ttbr_off;
+     int ttbr_count;
+ 
+-    void (*tlb_invalidate)(dart_dev_t *dart);
++    bool (*tlb_invalidate)(dart_dev_t *dart);
++};
++
++struct dart_owned_table {
++    u64 *table;
++    u64 *parent;
++    int root;
++    bool published;
++    struct dart_owned_table *next;
+ };
+ 
+ struct dart_dev {
+@@ -129,9 +137,80 @@ struct dart_dev {
+     u64 vm_base;
+ 
+     u64 *l1[DART_MAX_TTBR_COUNT];
++    struct dart_owned_table *tables;
++    bool faulted;
++    bool stopping;
++    struct dart_dev *quarantine_next;
+ };
+ 
+-static void dart_t8020_tlb_invalidate(dart_dev_t *dart)
++/* Failed owners remain reachable even if initialization cannot return a handle.
++ * No software retry or force-free claims an independently verified device reset. */
++static dart_dev_t *dart_quarantine;
++
++bool dart_is_faulted(const dart_dev_t *dart)
++{
++    return !dart || dart->faulted;
++}
++
++bool dart_has_faults(void)
++{
++    return dart_quarantine != NULL;
++}
++
++static bool dart_fault(dart_dev_t *dart)
++{
++    if (!dart->faulted) {
++        dart->faulted = true;
++        dart->quarantine_next = dart_quarantine;
++        dart_quarantine = dart;
++    }
++    return false;
++}
++
++static bool dart_invalidate(dart_dev_t *dart)
++{
++    if (dart->faulted)
++        return false;
++    if (!dart->params->tlb_invalidate(dart))
++        return dart_fault(dart);
++    return true;
++}
++
++static struct dart_owned_table *dart_owned(dart_dev_t *dart, u64 *table)
++{
++    for (struct dart_owned_table *entry = dart->tables; entry; entry = entry->next)
++        if (entry->table == table)
++            return entry;
++    return NULL;
++}
++
++static u64 *dart_alloc_table(dart_dev_t *dart, u64 *parent, int root)
++{
++    struct dart_owned_table *entry = calloc(1, sizeof(*entry));
++    if (!entry)
++        return NULL;
++    entry->table = memalign(SZ_16K, SZ_16K);
++    if (!entry->table) {
++        free(entry);
++        return NULL;
++    }
++    u64 mask = root >= 0 ? dart->params->ttbr_addr : dart->params->offset_mask;
++    unsigned shift = root >= 0 ? dart->params->ttbr_shift : DART_PTE_OFFSET_SHIFT;
++    u64 encoded = FIELD_PREP(mask, (u64)entry->table >> shift);
++    if ((FIELD_GET(mask, encoded) << shift) != (u64)entry->table) {
++        free(entry->table);
++        free(entry);
++        return NULL;
++    }
++    memset(entry->table, 0, SZ_16K);
++    entry->parent = parent;
++    entry->root = root;
++    entry->next = dart->tables;
++    dart->tables = entry;
++    return entry->table;
++}
++
++static bool dart_t8020_tlb_invalidate(dart_dev_t *dart)
+ {
+     write32(dart->regs + DART_T8020_STREAM_SELECT, BIT(dart->device));
+ 
+@@ -139,11 +218,14 @@ static void dart_t8020_tlb_invalidate(dart_dev_t *dart)
+     dma_wmb();
+     write32(dart->regs + DART_T8020_STREAM_COMMAND, DART_T8020_STREAM_COMMAND_INVALIDATE);
+ 
+-    if (poll32(dart->regs + DART_T8020_STREAM_COMMAND, DART_T8020_STREAM_COMMAND_BUSY, 0, 100))
++    if (poll32(dart->regs + DART_T8020_STREAM_COMMAND, DART_T8020_STREAM_COMMAND_BUSY, 0, 100)) {
+         printf("dart: DART_T8020_STREAM_COMMAND_BUSY did not clear.\n");
++        return false;
++    }
++    return true;
+ }
+ 
+-static void dart_t8110_tlb_invalidate(dart_dev_t *dart)
++static bool dart_t8110_tlb_invalidate(dart_dev_t *dart)
+ {
+     /* ensure that the DART can see the updated pagetables before invalidating */
+     dma_wmb();
+@@ -151,8 +233,11 @@ static void dart_t8110_tlb_invalidate(dart_dev_t *dart)
+             FIELD_PREP(DART_T8110_TLB_CMD_OP, DART_T8110_TLB_CMD_OP_FLUSH_SID) |
+                 FIELD_PREP(DART_T8110_TLB_CMD_STREAM, dart->device));
+ 
+-    if (poll32(dart->regs + DART_T8110_TLB_CMD, DART_T8110_TLB_CMD_BUSY, 0, 100))
++    if (poll32(dart->regs + DART_T8110_TLB_CMD, DART_T8110_TLB_CMD_BUSY, 0, 100)) {
+         printf("dart: DART_T8110_TLB_CMD_BUSY did not clear.\n");
++        return false;
++    }
++    return true;
+ }
+ 
+ const struct dart_params dart_t8020 = {
+@@ -205,6 +290,9 @@ const struct dart_params dart_t8110 = {
+ 
+ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t type)
+ {
++    for (dart_dev_t *failed = dart_quarantine; failed; failed = failed->quarantine_next)
++        if (failed->regs == base && failed->device == device)
++            return NULL;
+     dart_dev_t *dart = calloc(1, sizeof(*dart));
+     if (!dart)
+         return NULL;
+@@ -223,6 +311,9 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
+         case DART_T6000:
+             dart->params = &dart_t6000;
+             break;
++        default:
++            free(dart);
++            return NULL;
+     }
+ 
+     if (device >= dart->params->sid_count) {
+@@ -284,10 +375,9 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
+         if (dart->l1[i])
+             continue;
+ 
+-        dart->l1[i] = memalign(SZ_16K, SZ_16K);
++        dart->l1[i] = dart_alloc_table(dart, NULL, i);
+         if (!dart->l1[i])
+             goto error;
+-        memset(dart->l1[i], 0, SZ_16K);
+         new_tables |= BIT(i);
+     }
+ 
+@@ -305,6 +395,7 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
+         if (!(new_tables & BIT(i)))
+             continue;
+ 
++        dart_owned(dart, dart->l1[i])->published = true;
+         write32(DART_TTBR(dart, i),
+                 dart->params->ttbr_valid |
+                     FIELD_PREP(dart->params->ttbr_addr,
+@@ -314,13 +405,17 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
+     if (!dart->locked && !keep_pts)
+         write32(DART_TCR(dart), dart->params->tcr_enabled);
+ 
+-    dart->params->tlb_invalidate(dart);
++    if (!dart_invalidate(dart))
++        return NULL;
+     return dart;
+ 
+ error:
+-    for (int i = 0; i < dart->params->ttbr_count; i++)
+-        if (new_tables & BIT(i))
+-            free(dart->l1[i]);
++    while (dart->tables) {
++        struct dart_owned_table *entry = dart->tables;
++        dart->tables = entry->next;
++        free(entry->table);
++        free(entry);
++    }
+     free(dart);
+     return NULL;
+ }
+@@ -461,6 +556,8 @@ dart_dev_t *dart_init_fdt(void *dt, u32 phandle, int device, bool keep_pts)
+ 
+ int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_base)
+ {
++    if (dart_is_faulted(dart) || dart->stopping)
++        return DART_ERR_UNCERTAIN;
+     int node = adt_path_offset(adt, path);
+     if (node < 0) {
+         printf("dart: Error getting DART node %s\n", path);
+@@ -544,7 +641,8 @@ int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_
+             printf("dart: failed to update '%s/%s'\n", path, l2_tt_str);
+         }
+ 
+-        dart->params->tlb_invalidate(dart);
++        if (!dart_invalidate(dart))
++            return DART_ERR_UNCERTAIN;
+     }
+ 
+     return 0;
+@@ -566,15 +664,11 @@ static u64 *dart_next_table(dart_dev_t *dart, u64 *pte, bool create)
+         return dart_pte_table(dart, *pte);
+     if (!create)
+         return NULL;
+-    u64 *tbl = memalign(SZ_16K, SZ_16K);
++    u64 *tbl = dart_alloc_table(dart, pte, -1);
+     if (!tbl)
+         return NULL;
+     u64 offset = FIELD_PREP(dart->params->offset_mask, ((u64)tbl) >> DART_PTE_OFFSET_SHIFT);
+-    if (dart_pte_table(dart, offset) != tbl) {
+-        free(tbl);
+-        return NULL;
+-    }
+-    memset(tbl, 0, SZ_16K);
++    dart_owned(dart, tbl)->published = true;
+     *pte = offset | DART_PTE_VALID;
+     return tbl;
+ }
+@@ -624,7 +718,7 @@ int dart_map_flags(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len, u32
+     uintptr_t paddr = (uintptr_t)bfr;
+     u64 offset = 0;
+ 
+-    if (len % SZ_16K)
++    if (dart_is_faulted(dart) || dart->stopping || !len || len % SZ_16K)
+         return -1;
+     if (paddr % SZ_16K)
+         return -1;
+@@ -641,14 +735,16 @@ int dart_map_flags(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len, u32
+         int ret = dart_map_page(dart, iova + offset, paddr + offset, flags);
+ 
+         if (ret) {
+-            dart_unmap(dart, iova, offset);
++            if (offset && !dart_unmap(dart, iova, offset))
++                return DART_ERR_UNCERTAIN;
+             return ret;
+         }
+ 
+         offset += SZ_16K;
+     }
+ 
+-    dart->params->tlb_invalidate(dart);
++    if (!dart_invalidate(dart))
++        return DART_ERR_UNCERTAIN;
+     return 0;
+ }
+ 
+@@ -665,15 +761,15 @@ static void dart_unmap_page(dart_dev_t *dart, uintptr_t iova)
+         l2[l2_index] = 0;
+ }
+ 
+-void dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len)
++bool dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len)
+ {
+-    if (len % SZ_16K)
+-        return;
++    if (dart_is_faulted(dart) || dart->stopping || !len || len % SZ_16K)
++        return false;
+     if (iova % SZ_16K)
+-        return;
++        return false;
+     u64 limit = dart_iova_limit(dart);
+     if (iova >= limit || len > limit - iova)
+-        return;
++        return false;
+ 
+     while (len) {
+         dart_unmap_page(dart, iova);
+@@ -682,38 +778,71 @@ void dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len)
+         iova += SZ_16K;
+     }
+ 
+-    dart->params->tlb_invalidate(dart);
++    return dart_invalidate(dart);
+ }
+ 
+-void dart_free_l2(dart_dev_t *dart, uintptr_t iova)
++static bool dart_release_owned(dart_dev_t *dart, struct dart_owned_table *entry)
+ {
++    if (entry->published) {
++        if (entry->parent) {
++            if (!(*entry->parent & DART_PTE_VALID) ||
++                dart_pte_table(dart, *entry->parent) != entry->table)
++                return dart_fault(dart);
++            *entry->parent = 0;
++        } else {
++            u32 value = read32(DART_TTBR(dart, entry->root));
++            if (!(value & dart->params->ttbr_valid) ||
++                (FIELD_GET(dart->params->ttbr_addr, value) << dart->params->ttbr_shift) !=
++                    (u64)entry->table)
++                return dart_fault(dart);
++            write32(DART_TTBR(dart, entry->root), 0);
++        }
++        if (!dart_invalidate(dart))
++            return false;
++    }
++    struct dart_owned_table **link = &dart->tables;
++    while (*link != entry)
++        link = &(*link)->next;
++    *link = entry->next;
++    if (entry->root >= 0)
++        dart->l1[entry->root] = NULL;
++    free(entry->table);
++    free(entry);
++    return true;
++}
++
++bool dart_free_l2(dart_dev_t *dart, uintptr_t iova)
++{
++    if (dart_is_faulted(dart) || dart->stopping)
++        return false;
+     if (iova & ((1 << 25) - 1)) {
+         printf("dart: %08lx is not at the start of L2 table\n", iova);
+-        return;
++        return false;
+     }
+ 
+     u32 l1_index = (iova >> 25) & 0x7ff;
+     u64 *l1 = dart_get_l1(dart, iova, false);
+     if (!l1 || !(l1[l1_index] & DART_PTE_VALID))
+-        return;
++        return true;
+ 
+     u64 *l2 = dart_pte_table(dart, l1[l1_index]);
+-    if (!is_heap(l2))
+-        return; /* Retained firmware tables are not ours to free. */
++    struct dart_owned_table *entry = dart_owned(dart, l2);
++    if (!entry)
++        return true; /* Heap membership does not confer ownership on a borrower. */
+ 
+     for (u32 idx = 0; idx < 2048; idx++) {
+         if (l2[idx] & DART_PTE_VALID) {
+             printf("dart: %08lx is still mapped\n", iova + (idx << 14));
+-            return;
++            return true;
+         }
+     }
+-    l1[l1_index] = 0;
+-    dart->params->tlb_invalidate(dart);
+-    free(l2);
++    return dart_release_owned(dart, entry);
+ }
+ 
+ static void *dart_translate_internal(dart_dev_t *dart, uintptr_t iova, int silent)
+ {
++    if (dart_is_faulted(dart) || dart->stopping)
++        return NULL;
+     u32 l2_index = (iova >> 14) & 0x7ff;
+     u64 *l2 = dart_get_l2(dart, iova, false);
+     if (!l2 || !(l2[l2_index] & DART_PTE_VALID)) {
+@@ -762,6 +891,8 @@ static u64 dart_search_table(dart_dev_t *dart, u64 *table, u32 shift, u64 base,
+ 
+ u64 dart_search(dart_dev_t *dart, void *paddr)
+ {
++    if (dart_is_faulted(dart) || dart->stopping)
++        return DART_PTR_ERR;
+     for (int ttbr = 0; ttbr < dart->params->ttbr_count; ttbr++) {
+         if (!dart->l1[ttbr])
+             continue;
+@@ -775,6 +906,8 @@ u64 dart_search(dart_dev_t *dart, void *paddr)
+ 
+ u64 dart_find_iova(dart_dev_t *dart, s64 start, size_t len)
+ {
++    if (dart_is_faulted(dart) || dart->stopping)
++        return DART_PTR_ERR;
+     if (!len || len % SZ_16K)
+         return -1;
+     if (start < 0 || start % SZ_16K)
+@@ -806,45 +939,22 @@ u64 dart_find_iova(dart_dev_t *dart, s64 start, size_t len)
+     return DART_PTR_ERR;
+ }
+ 
+-static void dart_release_tables(dart_dev_t *dart, u64 *table, unsigned levels)
+-{
+-    if (levels == 1)
+-        return; /* Leaf entries name physical buffers, not allocated tables. */
+-    unsigned entries = levels == 3 ? 1U << (dart->iova_bits - 36) : SZ_16K / sizeof(u64);
+-    for (unsigned i = 0; i < entries; i++) {
+-        if (!(table[i] & DART_PTE_VALID))
+-            continue;
+-        u64 *child = dart_pte_table(dart, table[i]);
+-        if (!child)
+-            continue;
+-        dart_release_tables(dart, child, levels - 1);
+-        if (is_heap(child)) {
+-            table[i] = 0;
+-            dart->params->tlb_invalidate(dart);
+-            free(child);
+-        }
+-    }
+-}
+-
+-void dart_shutdown(dart_dev_t *dart)
++bool dart_shutdown(dart_dev_t *dart)
+ {
++    if (!dart)
++        return true;
++    if (dart->faulted)
++        return false;
++    dart->stopping = true;
+     if (!dart->locked && !dart->keep)
+         write32(DART_TCR(dart), dart->params->tcr_disabled);
+ 
+-    for (int i = 0; i < dart->params->ttbr_count; ++i)
+-        if (is_heap(dart->l1[i]))
+-            write32(DART_TTBR(dart, i), 0);
+-
+-    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr)
+-        if (dart->l1[ttbr])
+-            dart_release_tables(dart, dart->l1[ttbr], dart->four_levels ? 3 : 2);
+-
+-    dart->params->tlb_invalidate(dart);
+-
+-    for (int i = 0; i < dart->params->ttbr_count; ++i)
+-        if (is_heap(dart->l1[i]))
+-            free(dart->l1[i]);
++    /* Children are allocated after parents and owned records are LIFO. */
++    while (dart->tables)
++        if (!dart_release_owned(dart, dart->tables))
++            return false;
+     free(dart);
++    return true;
+ }
+ 
+ u64 dart_vm_base(dart_dev_t *dart)
+diff --git a/src/dart.h b/src/dart.h
+index e6fc385..8553467 100644
+--- a/src/dart.h
++++ b/src/dart.h
+@@ -8,6 +8,8 @@
+ #define DART_PTR_ERR     BIT(63)
+ #define DART_IS_ERR(val) FIELD_GET(DART_PTR_ERR, val)
+ #define DART_ERR_UNSUPPORTED_PT_REGION (-2)
++/* Mapping may have been observed by hardware: retain backing memory and IOVA. */
++#define DART_ERR_UNCERTAIN (-3)
+ 
+ typedef struct dart_dev dart_dev_t;
+ 
+@@ -24,13 +26,18 @@ dart_dev_t *dart_init_fdt(void *dt, u32 phandle, int device, bool keep_pts);
+ int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_base);
+ int dart_map(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len);
+ int dart_map_flags(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len, u32 flags);
+-void dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len);
+-void dart_free_l2(dart_dev_t *dart, uintptr_t iova);
++/* False retains ownership; never free/reuse backing memory after failed unmap. */
++bool dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len);
++/* Reclaim an empty table owned by this handle; nonempty/borrowed tables stay. */
++bool dart_free_l2(dart_dev_t *dart, uintptr_t iova);
+ void *dart_translate(dart_dev_t *dart, uintptr_t iova);
+ void *dart_translate_silent(dart_dev_t *dart, uintptr_t iova);
+ u64 dart_search(dart_dev_t *dart, void *paddr);
+ u64 dart_find_iova(dart_dev_t *dart, s64 start, size_t len);
+-void dart_shutdown(dart_dev_t *dart);
++bool dart_shutdown(dart_dev_t *dart);
++bool dart_is_faulted(const dart_dev_t *dart);
++/* Includes failed initialization whose published owner could not be returned. */
++bool dart_has_faults(void);
+ u64 dart_vm_base(dart_dev_t *dart);
+ 
+ #endif
+diff --git a/src/rtkit.c b/src/rtkit.c
+index 031bfab..9b81d09 100644
+--- a/src/rtkit.c
++++ b/src/rtkit.c
+@@ -133,6 +133,8 @@ struct crashlog_entry {
+ rtkit_dev_t *rtkit_init(const char *name, asc_dev_t *asc, dart_dev_t *dart,
+                         iova_domain_t *dart_iovad, sart_dev_t *sart, bool sram)
+ {
++    if (dart && dart_is_faulted(dart))
++        return NULL;
+     if (dart && sart) {
+         printf("rtkit: Cannot use both SART and DART simultaneously\n");
+         return NULL;
+@@ -218,38 +220,44 @@ static bool rtkit_dart_range(rtkit_dev_t *rtk, u64 iova, size_t sz)
+     return !first_tag || sz <= first_tag - (iova & (first_tag - 1));
+ }
+ 
+-bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
++int rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva)
+ {
+     if (!phys || !dva || ((u64)phys & (SZ_16K - 1)) || !rtkit_buffer_size(&sz) ||
+         sz - 1 > (u64)-1 - (u64)phys)
+-        return false;
++        return -1;
+ 
+     if (rtk->sart) {
+         if (!sart_add_allowed_region(rtk->sart, phys, sz)) {
+             rtkit_printf("sart_add_allowed_region failed (%p, 0x%lx)\n", phys, sz);
+-            return false;
++            return -1;
+         }
+         *dva = (u64)phys;
+-        return true;
++        return 0;
+     } else if (rtk->dart) {
+         u64 iova = iova_alloc(rtk->dart_iovad, sz);
+         if (!iova) {
+             rtkit_printf("failed to alloc iova (size 0x%lx)\n", sz);
+-            return false;
++            return -1;
+         }
+ 
+-        if (!rtkit_dart_range(rtk, iova, sz) || (iova & (SZ_16K - 1)) ||
+-            dart_map(rtk->dart, iova, phys, sz) < 0) {
++        int ret = -1;
++        if (rtkit_dart_range(rtk, iova, sz) && !(iova & (SZ_16K - 1)))
++            ret = dart_map(rtk->dart, iova, phys, sz);
++        if (ret) {
+             rtkit_printf("failed to DART map %p -> 0x%lx (0x%lx)\n", phys, iova, sz);
++            if (ret == DART_ERR_UNCERTAIN) {
++                *dva = iova | rtk->dva_base;
++                return ret;
++            }
+             iova_free(rtk->dart_iovad, iova, sz);
+-            return false;
++            return -1;
+         }
+ 
+         *dva = iova | rtk->dva_base;
+-        return true;
++        return 0;
+     } else {
+         rtkit_printf("TODO: implement no IOMMU buffers\n");
+-        return false;
++        return -1;
+     }
+ }
+ 
+@@ -267,7 +275,8 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
+         dva &= ~rtk->dva_base;
+         if ((dva & (SZ_16K - 1)) || !rtkit_dart_range(rtk, dva, sz))
+             return false;
+-        dart_unmap(rtk->dart, dva, sz);
++        if (!dart_unmap(rtk->dart, dva, sz))
++            return false;
+         iova_free(rtk->dart_iovad, dva, sz);
+         return true;
+     } else {
+@@ -287,8 +296,12 @@ bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz)
+         return false;
+     }
+ 
+-    if (!rtkit_map(rtk, allocated.bfr, sz, &allocated.dva)) {
+-        free(allocated.bfr);
++    int ret = rtkit_map(rtk, allocated.bfr, sz, &allocated.dva);
++    if (ret) {
++        if (ret == DART_ERR_UNCERTAIN)
++            *bfr = allocated;
++        else
++            free(allocated.bfr);
+         return false;
+     }
+     *bfr = allocated;
+diff --git a/src/rtkit.h b/src/rtkit.h
+index 59eb99a..6ad30b8 100644
+--- a/src/rtkit.h
++++ b/src/rtkit.h
+@@ -43,9 +43,12 @@ bool rtkit_can_recv(rtkit_dev_t *rtk);
+ int rtkit_recv(rtkit_dev_t *rtk, struct rtkit_message *msg);
+ bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg);
+ 
+-bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva);
++/* 0: mapped; -1: rejected/unwound; DART_ERR_UNCERTAIN: retain phys and *dva.
++ * The uncertain result publishes the reserved DVA so its owner remains reachable. */
++int rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva);
+ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz);
+ 
++/* False may retain an owned descriptor after uncertain DART publication. */
+ bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz);
+ bool rtkit_free_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr);
+ 
+diff --git a/src/iova.c b/src/iova.c
+index 69e71d8..f847e2e 100644
+--- a/src/iova.c
++++ b/src/iova.c
+@@ -54,8 +54,17 @@ iova_domain_t *iovad_init(u64 base, u64 limit)
+     return iovad;
+ }
+ 
+-void iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart)
++bool iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart)
+ {
++    if (!iovad)
++        return true;
++    if (dart)
++        for (u64 addr = iovad->base; addr < iovad->limit; addr += SZ_32M) {
++            if (!dart_free_l2(dart, addr))
++                return false;
++            if (iovad->limit - addr <= SZ_32M)
++                break;
++        }
+     struct iova_block *blk = iovad->free_list;
+ 
+     while (blk != NULL) {
+@@ -65,14 +74,8 @@ void iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart)
+         free(blk_free);
+     }
+ 
+-    if (dart)
+-        for (u64 addr = iovad->base; addr < iovad->limit; addr += SZ_32M) {
+-            dart_free_l2(dart, addr);
+-            if (iovad->limit - addr <= SZ_32M)
+-                break;
+-        }
+-
+     free(iovad);
++    return true;
+ }
+ 
+ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz)
+diff --git a/src/iova.h b/src/iova.h
+index 1cf563c..0107abf 100644
+--- a/src/iova.h
++++ b/src/iova.h
+@@ -10,7 +10,8 @@ typedef struct iova_domain iova_domain_t;
+ 
+ /* Exclusive page-aligned limit; base is 32 MiB aligned. Page zero is excluded. */
+ iova_domain_t *iovad_init(u64 base, u64 limit);
+-void iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart);
++/* False retains the domain when an owned empty table cannot be released. */
++bool iovad_shutdown(iova_domain_t *iovad, dart_dev_t *dart);
+ 
+ /* Reserve every page intersecting [iova, iova + sz), atomically on failure. */
+ bool iova_reserve(iova_domain_t *iovad, u64 iova, size_t sz);
+diff --git a/src/dcp.c b/src/dcp.c
+index 0cd8754..1b73e90 100644
+--- a/src/dcp.c
++++ b/src/dcp.c
+@@ -94,7 +94,8 @@ static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
+ 
+ int dcp_connect_dptx(dcp_dev_t *dcp)
+ {
+-    if (!dcp || dcp->stopping)
++    if (!dcp || dcp->stopping || dart_is_faulted(dcp->dart_dcp) ||
++        dart_is_faulted(dcp->dart_disp))
+         return -1;
+     if (dcp->dptx_ep && dcp->phy) {
+         return dcp_dptx_connect(dcp->dptx_ep, dcp->phy, dcp->die, 0);
+@@ -105,7 +106,8 @@ int dcp_connect_dptx(dcp_dev_t *dcp)
+ 
+ int dcp_work(dcp_dev_t *dcp)
+ {
+-    if (!dcp || dcp->stopping)
++    if (!dcp || dcp->stopping || dart_is_faulted(dcp->dart_dcp) ||
++        dart_is_faulted(dcp->dart_disp))
+         return -1;
+     return afk_epic_work(dcp->afk, -1);
+ }
+@@ -200,7 +202,7 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+     }
+     u64 vm_base = dart_vm_base(dcp->dart_dcp);
+     if (dart_setup_pt_region(dcp->dart_dcp, cfg->dcp_dart, sid, vm_base) ==
+-        DART_ERR_UNSUPPORTED_PT_REGION)
++            DART_ERR_UNSUPPORTED_PT_REGION || dart_is_faulted(dcp->dart_dcp))
+         goto out_dart_dcp;
+ 
+     dcp->dart_disp = dart_init_adt(cfg->disp_dart, 0, 0, true);
+@@ -210,7 +212,7 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+     }
+     // set disp0's page tables at dart-dcp's vm-base
+     if (dart_setup_pt_region(dcp->dart_disp, cfg->disp_dart, 0, vm_base) ==
+-        DART_ERR_UNSUPPORTED_PT_REGION)
++            DART_ERR_UNSUPPORTED_PT_REGION || dart_is_faulted(dcp->dart_disp))
+         goto out_dart_disp;
+ 
+     dcp->iovad_dcp = iovad_init(vm_base + 0x10000000, vm_base + 0x20000000);
+@@ -293,7 +295,7 @@ int dcp_shutdown(dcp_dev_t *dcp, bool sleep)
+ 
+     /* Retained DART state may already be in use by firmware. Without an RTKit
+      * owner we cannot establish quiescence, including early init failures. */
+-    if (!dcp->rtkit && (dcp->dart_dcp || dcp->dart_disp))
++    if (!dcp->rtkit && !dcp->quiesced && (dcp->dart_dcp || dcp->dart_disp))
+         return -1;
+     if (dcp->rtkit && !dcp->quiesced) {
+         if (!(sleep ? rtkit_sleep(dcp->rtkit) : rtkit_quiesce(dcp->rtkit)))
+@@ -307,12 +309,15 @@ int dcp_shutdown(dcp_dev_t *dcp, bool sleep)
+     if (!rtkit_free(dcp->rtkit))
+         return -1;
+     dcp->rtkit = NULL;
+-    if (dcp->dart_disp)
+-        dart_shutdown(dcp->dart_disp);
+-    if (dcp->iovad_dcp)
+-        iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
+-    if (dcp->dart_dcp)
+-        dart_shutdown(dcp->dart_dcp);
++    if (!dart_shutdown(dcp->dart_disp))
++        return -1;
++    dcp->dart_disp = NULL;
++    if (!iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp))
++        return -1;
++    dcp->iovad_dcp = NULL;
++    if (!dart_shutdown(dcp->dart_dcp))
++        return -1;
++    dcp->dart_dcp = NULL;
+     if (dcp->asc)
+         asc_free(dcp->asc);
+     free(dcp->phy);
+diff --git a/src/display.c b/src/display.c
+index e034b27..25ffbc7 100644
+--- a/src/display.c
++++ b/src/display.c
+@@ -236,13 +236,18 @@ static uintptr_t display_map_fb(uintptr_t iova, u64 paddr, u64 size)
+     int ret = dart_map(dcp->dart_disp, iova, (void *)paddr, size);
+     if (ret < 0) {
+         printf("display: failed to map fb to dart-disp0\n");
++        if (dart_is_faulted(dcp->dart_disp))
++            dcp->stopping = true;
+         return DART_PTR_ERR;
+     }
+ 
+     ret = dart_map(dcp->dart_dcp, iova, (void *)paddr, size);
+     if (ret < 0) {
+         printf("display: failed to map fb to dart-dcp\n");
+-        dart_unmap(dcp->dart_disp, iova, size);
++        if (dart_is_faulted(dcp->dart_dcp))
++            dcp->stopping = true;
++        if (!dart_unmap(dcp->dart_disp, iova, size))
++            dcp->stopping = true;
+         return DART_PTR_ERR;
+     }
+ 
+@@ -544,8 +549,11 @@ int display_configure(const char *config)
+         /* wait for swap durations + 1ms */
+         u32 delay = (((1000 << 16) + tbest.fps - 1) / tbest.fps) + 1;
+         mdelay(delay);
+-        dart_unmap(dcp->dart_disp, fb_dva, fb_size);
+-        dart_unmap(dcp->dart_dcp, fb_dva, fb_size);
++        if (!dart_unmap(dcp->dart_disp, fb_dva, fb_size) ||
++            !dart_unmap(dcp->dart_dcp, fb_dva, fb_size)) {
++            dcp->stopping = true;
++            return -1;
++        }
+ 
+         fb_dva = display_map_fb(fb_dva, fb_pa, size);
+         if (DART_IS_ERR(fb_dva)) {
+@@ -612,8 +620,11 @@ int display_configure(const char *config)
+ 
+     if (tmp_dva) {
+         // unmap / free temporary dva
+-        dart_unmap(dcp->dart_disp, tmp_dva, size);
+-        dart_unmap(dcp->dart_dcp, tmp_dva, size);
++        if (!dart_unmap(dcp->dart_disp, tmp_dva, size) ||
++            !dart_unmap(dcp->dart_dcp, tmp_dva, size)) {
++            dcp->stopping = true;
++            return -1;
++        }
+         iova_free(dcp->iovad_dcp, tmp_dva, size);
+     }
+ 
+diff --git a/src/main.c b/src/main.c
+index 5a465b2..fbd6f61 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -8,6 +8,7 @@
+ #include "adt.h"
+ #include "aic.h"
+ #include "cpufreq.h"
++#include "dart.h"
+ #include "display.h"
+ #include "exception.h"
+ #include "fb.h"
+@@ -197,7 +198,11 @@ void m1n1_main(void)
+ #ifndef BRINGUP
+     /* Keep debug transports and exception handling alive if DCP is not safe
+      * to hand over. Do not automatically reboot or tear down more owners. */
+-    while (display_shutdown(DCP_SLEEP_IF_EXTERNAL) || !next_stage.entry || !nvme_shutdown()) {
++    /* Retry USB cleanup after active callback frames unwind. The checked USB
++     * shutdown also rejects retained constructor faults without an iodev. */
++    while (dart_has_faults() || display_shutdown(DCP_SLEEP_IF_EXTERNAL) ||
++           !next_stage.entry || !nvme_shutdown() ||
++           !usb_iodev_shutdown()) {
+         printf("Shutdown incomplete or no next stage. Remaining in proxy; no handoff.\n");
+         uartproxy_run(NULL);
+     }
+@@ -205,7 +210,6 @@ void m1n1_main(void)
+ 
+     exception_shutdown();
+ #ifndef BRINGUP
+-    usb_iodev_shutdown();
+ #ifdef USE_FB
+     fb_shutdown(next_stage.restore_logo);
+ #endif
+diff --git a/src/hv.c b/src/hv.c
+index 642edd5..9b9a37f 100644
+--- a/src/hv.c
++++ b/src/hv.c
+@@ -3,6 +3,7 @@
+ #include "hv.h"
+ #include "assert.h"
+ #include "cpu_regs.h"
++#include "dart.h"
+ #include "display.h"
+ #include "gxf.h"
+ #include "memory.h"
+@@ -58,6 +59,8 @@ static bool hv_initialized;
+ int hv_init(void)
+ {
+     hv_initialized = false;
++    if (dart_has_faults() || usb_dwc3_has_faults())
++        return -1;
+     // Make sure we wake up DCP if we put it to sleep, just quiesce it to match ADT
+     if (display_is_external && display_start_dcp() < 0)
+         return -1;
+diff --git a/src/proxy.c b/src/proxy.c
+index b3ab7b4..4de705a 100644
+--- a/src/proxy.c
++++ b/src/proxy.c
+@@ -479,14 +479,15 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+                                            request->args[3]);
+             break;
+         case P_DART_SHUTDOWN:
+-            dart_shutdown((dart_dev_t *)request->args[0]);
++            reply->retval = dart_shutdown((dart_dev_t *)request->args[0]);
+             break;
+         case P_DART_MAP:
+             reply->retval = dart_map((dart_dev_t *)request->args[0], request->args[1],
+                                      (void *)request->args[2], request->args[3]);
+             break;
+         case P_DART_UNMAP:
+-            dart_unmap((dart_dev_t *)request->args[0], request->args[1], request->args[2]);
++            reply->retval = dart_unmap((dart_dev_t *)request->args[0], request->args[1],
++                                       request->args[2]);
+             break;
+ 
+         case P_HV_INIT:
+diff --git a/src/kboot.c b/src/kboot.c
+index e669ff2..92ef5c0 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -1716,12 +1716,12 @@ static int dt_add_reserved_regions(const char *dcp_alias, const char *disp_alias
+         bail_cleanup("FDT: failed to enable '%s'\n", dcp_alias);
+ 
+ err:
+-    if (dart_dcp)
+-        dart_shutdown(dart_dcp);
+-    if (dart_disp)
+-        dart_shutdown(dart_disp);
+-    if (dart_piodma)
+-        dart_shutdown(dart_piodma);
++    if (!dart_shutdown(dart_dcp))
++        ret = -1;
++    if (!dart_shutdown(dart_disp))
++        ret = -1;
++    if (!dart_shutdown(dart_piodma))
++        ret = -1;
+ 
+     return ret;
+ }
+diff --git a/src/usb.c b/src/usb.c
+index f078ac2..541720c 100644
+--- a/src/usb.c
++++ b/src/usb.c
+@@ -161,12 +161,13 @@ int usb_phy_bringup(u32 idx)
+ 
+ dwc3_dev_t *usb_iodev_bringup(u32 idx)
+ {
+-    dart_dev_t *usb_dart = usb_dart_init(idx);
+-    if (!usb_dart)
++    struct usb_drd_regs usb_reg;
++    if (idx >= USB_IODEV_COUNT || usb_drd_get_regs(idx, &usb_reg) < 0 ||
++        usb_dwc3_owns_regs(usb_reg.drd_regs))
+         return NULL;
+ 
+-    struct usb_drd_regs usb_reg;
+-    if (usb_drd_get_regs(idx, &usb_reg) < 0)
++    dart_dev_t *usb_dart = usb_dart_init(idx);
++    if (!usb_dart)
+         return NULL;
+ 
+     return usb_dwc3_init(usb_reg.drd_regs, usb_dart);
+@@ -429,14 +430,19 @@ void usb_iodev_init(void)
+         dwc3_dev_t *opaque;
+         struct iodev *usb_iodev;
+ 
+-        opaque = usb_iodev_bringup(i);
+-        if (!opaque)
++        if (iodev_get_opaque(IODEV_USB0 + i))
+             continue;
+ 
+         usb_iodev = memalign(SPINLOCK_ALIGN, sizeof(*usb_iodev));
+         if (!usb_iodev)
+             continue;
+ 
++        opaque = usb_iodev_bringup(i);
++        if (!opaque) {
++            free(usb_iodev);
++            continue;
++        }
++
+         usb_iodev->ops = &iodev_usb_ops;
+         usb_iodev->opaque = opaque;
+         usb_iodev->usage = USAGE_CONSOLE | USAGE_UARTPROXY;
+@@ -447,17 +453,24 @@ void usb_iodev_init(void)
+     }
+ }
+ 
+-void usb_iodev_shutdown(void)
++bool usb_iodev_shutdown(void)
+ {
+     for (int i = FIRST_USB_IODEV; i < USB_IODEV_COUNT; i++) {
+-        struct iodev *usb_iodev = iodev_unregister_device(IODEV_USB0 + i);
+-        if (!usb_iodev)
++        dwc3_dev_t *opaque = iodev_get_opaque(IODEV_USB0 + i);
++        if (!opaque)
+             continue;
+ 
+         printf("USB%d: shutdown\n", i);
+-        usb_dwc3_shutdown(usb_iodev->opaque);
++        /* Disable the non-owning alias before any successful device free. */
++        if (iodev_usb_vuart.opaque == opaque)
++            iodev_usb_vuart.opaque = NULL;
++        if (!usb_dwc3_shutdown(opaque))
++            return false;
++        struct iodev *usb_iodev = iodev_unregister_device(IODEV_USB0 + i);
+         free(usb_iodev);
+     }
++    /* Failed constructors may have retained an owner without an iodev. */
++    return !usb_dwc3_has_faults();
+ }
+ 
+ void usb_iodev_vuart_setup(iodev_id_t iodev)
+diff --git a/src/usb.h b/src/usb.h
+index 1ba859a..83016d1 100644
+--- a/src/usb.h
++++ b/src/usb.h
+@@ -12,7 +12,7 @@ dwc3_dev_t *usb_bringup(u32 idx);
+ void usb_init(void);
+ void usb_hpm_restore_irqs(bool force);
+ void usb_iodev_init(void);
+-void usb_iodev_shutdown(void);
++bool usb_iodev_shutdown(void);
+ void usb_iodev_vuart_setup(iodev_id_t iodev);
+ 
+ #endif
+diff --git a/src/usb_dwc3.c b/src/usb_dwc3.c
+index 14db08f..8fc1cef 100644
+--- a/src/usb_dwc3.c
++++ b/src/usb_dwc3.c
+@@ -97,6 +97,12 @@ typedef struct dwc3_dev {
+     /* USB DRD */
+     uintptr_t regs;
+     dart_dev_t *dart;
++    struct dwc3_dev *next_owned;
++    unsigned int active_calls;
++    bool handling_events;
++    bool stopping;
++    bool shutting_down;
++    bool faulted;
+ 
+     enum ep0_state ep0_state;
+     const void *ep0_buffer;
+@@ -135,6 +141,30 @@ typedef struct dwc3_dev {
+ 
+ } dwc3_dev_t;
+ 
++/* Includes failed constructors whose DMA ownership could not be released. */
++static dwc3_dev_t *owned_devices;
++
++bool usb_dwc3_owns_regs(uintptr_t regs)
++{
++    for (dwc3_dev_t *dev = owned_devices; dev; dev = dev->next_owned)
++        if (dev->regs == regs)
++            return true;
++    return false;
++}
++
++bool usb_dwc3_has_faults(void)
++{
++    for (dwc3_dev_t *dev = owned_devices; dev; dev = dev->next_owned)
++        if (dev->stopping || dev->faulted || dart_is_faulted(dev->dart))
++            return true;
++    return false;
++}
++
++static bool usb_dwc3_available(dwc3_dev_t *dev)
++{
++    return dev && !dev->stopping && !dev->faulted && !dart_is_faulted(dev->dart);
++}
++
+ static const struct usb_string_descriptor str_manufacturer =
+     make_usb_string_descriptor("Asahi Linux");
+ static const struct usb_string_descriptor str_product =
+@@ -1077,17 +1107,21 @@ static void usb_dwc3_handle_event(dwc3_dev_t *dev, const union dwc3_event event)
+ 
+ void usb_dwc3_handle_events(dwc3_dev_t *dev)
+ {
+-    if (!dev)
++    if (!usb_dwc3_available(dev) || dev->handling_events)
+         return;
+ 
+     u32 n_events = read32(dev->regs + DWC3_GEVNTCOUNT(0)) / sizeof(union dwc3_event);
+     if (n_events == 0)
+         return;
+ 
++    dev->active_calls++;
++    dev->handling_events = true;
+     dma_rmb();
+ 
+     const union dwc3_event *evtbuffer = dev->evtbuffer;
+     for (u32 i = 0; i < n_events; ++i) {
++        if (!usb_dwc3_available(dev))
++            break;
+         usb_dwc3_handle_event(dev, evtbuffer[dev->evt_buffer_offset]);
+ 
+         dev->evt_buffer_offset =
+@@ -1095,20 +1129,34 @@ void usb_dwc3_handle_events(dwc3_dev_t *dev)
+     }
+ 
+     write32(dev->regs + DWC3_GEVNTCOUNT(0), sizeof(union dwc3_event) * n_events);
++    dev->handling_events = false;
++    dev->active_calls--;
+ }
+ 
+ dwc3_dev_t *usb_dwc3_init(uintptr_t regs, dart_dev_t *dart)
+ {
++    if (!dart || dart_is_faulted(dart))
++        return NULL;
++    for (dwc3_dev_t *owner = owned_devices; owner; owner = owner->next_owned)
++        if (owner->dart == dart)
++            return NULL;
++    if (usb_dwc3_owns_regs(regs)) {
++        dart_shutdown(dart); /* Failed release remains on DART's quarantine list. */
++        return NULL;
++    }
+     /* sanity check */
+     u32 snpsid = read32(regs + DWC3_GSNPSID);
+     if ((snpsid & DWC3_GSNPSID_MASK) != 0x33310000) {
+         debug_printf("no DWC3 core found at 0x%lx: %08x\n", regs, snpsid);
++        dart_shutdown(dart);
+         return NULL;
+     }
+ 
+     dwc3_dev_t *dev = calloc(1, sizeof(*dev));
+-    if (!dev)
++    if (!dev) {
++        dart_shutdown(dart);
+         return NULL;
++    }
+ 
+     memset(dev, 0, sizeof(*dev));
+     for (int i = 0; i < CDC_ACM_PIPE_MAX; i++)
+@@ -1117,6 +1165,8 @@ dwc3_dev_t *usb_dwc3_init(uintptr_t regs, dart_dev_t *dart)
+ 
+     dev->regs = regs;
+     dev->dart = dart;
++    dev->next_owned = owned_devices;
++    owned_devices = dev;
+ 
+     /* allocate and map dma buffers */
+     dev->evtbuffer = memalign(SZ_16K, max(DWC3_EVENT_BUFFERS_SIZE, SZ_16K));
+@@ -1266,18 +1316,28 @@ error:
+     return NULL;
+ }
+ 
+-void usb_dwc3_shutdown(dwc3_dev_t *dev)
++bool usb_dwc3_shutdown(dwc3_dev_t *dev)
+ {
++    if (!dev)
++        return true;
++    dev->stopping = true;
++    /* Existing iodev calls are serialized; protect synchronous callback frames. */
++    if (dev->active_calls || dev->shutting_down || dev->faulted || dart_is_faulted(dev->dart))
++        return false;
++    dev->shutting_down = true;
+     for (int i = 0; i < CDC_ACM_PIPE_MAX; i++)
+         dev->pipe[i].ready = false;
+ 
+     /* stop all ongoing transfers */
+-    for (int i = 1; i < MAX_ENDPOINTS; ++i) {
++    for (int i = 0; i < MAX_ENDPOINTS; ++i) {
+         if (!dev->endpoints[i].xfer_in_progress)
+             continue;
+ 
+-        if (usb_dwc3_ep_command(dev, i, DWC3_DEPCMD_ENDTRANSFER, 0, 0, 0))
++        if (usb_dwc3_ep_command(dev, i, DWC3_DEPCMD_ENDTRANSFER, 0, 0, 0)) {
+             usb_debug_printf("cannot issue DWC3_DEPCMD_ENDTRANSFER for EP %02x.\n", i);
++            goto uncertain;
++        }
++        dev->endpoints[i].xfer_in_progress = false;
+     }
+ 
+     /* disable events and all endpoints and stop the device controller */
+@@ -1286,19 +1346,26 @@ void usb_dwc3_shutdown(dwc3_dev_t *dev)
+     clear32(dev->regs + DWC3_DCTL, DWC3_DCTL_RUN_STOP);
+ 
+     /* wait until the controller is shut down */
+-    if (poll32(dev->regs + DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT, 1000))
++    if (poll32(dev->regs + DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT, 1000)) {
+         usb_debug_printf("timeout while waiting for DWC3_DSTS_DEVCTRLHLT during shutdown.\n");
++        goto uncertain;
++    }
+ 
+     /* reset the device side of the controller just to be safe */
+     set32(dev->regs + DWC3_DCTL, DWC3_DCTL_CSFTRST);
+-    if (poll32(dev->regs + DWC3_DCTL, DWC3_DCTL_CSFTRST, 0, 1000))
++    if (poll32(dev->regs + DWC3_DCTL, DWC3_DCTL_CSFTRST, 0, 1000)) {
+         usb_debug_printf("timeout while waiting for DWC3_DCTL_CSFTRST to clear during shutdown.\n");
++        goto uncertain;
++    }
+ 
+     /* unmap and free dma buffers */
+-    dart_unmap(dev->dart, TRB_BUFFER_IOVA, TRB_BUFFER_SIZE);
+-    dart_unmap(dev->dart, XFER_BUFFER_IOVA, XFER_BUFFER_SIZE);
+-    dart_unmap(dev->dart, SCRATCHPAD_IOVA, max(DWC3_SCRATCHPAD_SIZE, SZ_16K));
+-    dart_unmap(dev->dart, EVENT_BUFFER_IOVA, max(DWC3_EVENT_BUFFERS_SIZE, SZ_16K));
++    if (!dart_unmap(dev->dart, TRB_BUFFER_IOVA, TRB_BUFFER_SIZE) ||
++        !dart_unmap(dev->dart, XFER_BUFFER_IOVA, XFER_BUFFER_SIZE) ||
++        !dart_unmap(dev->dart, SCRATCHPAD_IOVA, max(DWC3_SCRATCHPAD_SIZE, SZ_16K)) ||
++        !dart_unmap(dev->dart, EVENT_BUFFER_IOVA, max(DWC3_EVENT_BUFFERS_SIZE, SZ_16K)) ||
++        !dart_shutdown(dev->dart))
++        goto uncertain;
++    dev->dart = NULL;
+ 
+     free(dev->evtbuffer);
+     free(dev->scratchpad);
+@@ -1309,39 +1376,57 @@ void usb_dwc3_shutdown(dwc3_dev_t *dev)
+         ringbuffer_free(dev->pipe[i].host2device);
+     }
+ 
+-    if (dev->dart)
+-        dart_shutdown(dev->dart);
++    dwc3_dev_t **link = &owned_devices;
++    while (*link != dev)
++        link = &(*link)->next_owned;
++    *link = dev->next_owned;
+     free(dev);
++    return true;
++
++uncertain:
++    dev->faulted = true;
++    dev->shutting_down = false;
++    return false;
+ }
+ 
+ u8 usb_dwc3_getbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ {
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX)
++        return 0;
+     ringbuffer_t *host2device = dev->pipe[pipe].host2device;
+     if (!host2device)
+         return 0;
+ 
+     u8 ep = dev->pipe[pipe].ep_out;
+ 
+-    u8 c;
+-    while (ringbuffer_read(&c, 1, host2device) < 1) {
++    dev->active_calls++;
++    u8 c = 0;
++    while (usb_dwc3_available(dev) && ringbuffer_read(&c, 1, host2device) < 1) {
+         usb_dwc3_handle_events(dev);
+-        usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
++        if (usb_dwc3_available(dev))
++            usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
+     }
++    dev->active_calls--;
+     return c;
+ }
+ 
+ void usb_dwc3_putbyte(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, u8 byte)
+ {
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX)
++        return;
+     ringbuffer_t *device2host = dev->pipe[pipe].device2host;
+     if (!device2host)
+         return;
+ 
+     u8 ep = dev->pipe[pipe].ep_in;
+ 
+-    while (ringbuffer_write(&byte, 1, device2host) < 1) {
++    dev->active_calls++;
++    while (usb_dwc3_available(dev) && ringbuffer_write(&byte, 1, device2host) < 1) {
+         usb_dwc3_handle_events(dev);
+-        usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
++        if (usb_dwc3_available(dev))
++            usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
+     }
++    dev->active_calls--;
+ }
+ 
+ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, size_t count)
+@@ -1349,7 +1434,7 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf,
+     const u8 *p = buf;
+     size_t wrote, sent = 0;
+ 
+-    if (!dev || !dev->pipe[pipe].ready)
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX || !dev->pipe[pipe].ready)
+         return 0;
+ 
+     ringbuffer_t *device2host = dev->pipe[pipe].device2host;
+@@ -1358,30 +1443,36 @@ size_t usb_dwc3_queue(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf,
+ 
+     u8 ep = dev->pipe[pipe].ep_in;
+ 
+-    while (count) {
++    dev->active_calls++;
++    while (count && usb_dwc3_available(dev) && dev->pipe[pipe].ready) {
+         wrote = ringbuffer_write(p, count, device2host);
+         count -= wrote;
+         p += wrote;
+         sent += wrote;
+         if (count) {
+             usb_dwc3_handle_events(dev);
+-            usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
++            if (usb_dwc3_available(dev))
++                usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
+         }
+     }
+ 
++    dev->active_calls--;
+     return sent;
+ }
+ 
+ size_t usb_dwc3_write(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, const void *buf, size_t count)
+ {
+-    if (!dev)
+-        return -1;
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX)
++        return 0;
+ 
++    dev->active_calls++;
+     u8 ep = dev->pipe[pipe].ep_in;
+     size_t ret = usb_dwc3_queue(dev, pipe, buf, count);
+ 
+-    usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
++    if (usb_dwc3_available(dev))
++        usb_dwc3_cdc_start_bulk_in_xfer(dev, ep);
+ 
++    dev->active_calls--;
+     return ret;
+ }
+ 
+@@ -1390,7 +1481,7 @@ size_t usb_dwc3_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, void *buf, size_t
+     u8 *p = buf;
+     size_t read, recvd = 0;
+ 
+-    if (!dev || !dev->pipe[pipe].ready)
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX || !dev->pipe[pipe].ready)
+         return 0;
+ 
+     ringbuffer_t *host2device = dev->pipe[pipe].host2device;
+@@ -1399,21 +1490,24 @@ size_t usb_dwc3_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe, void *buf, size_t
+ 
+     u8 ep = dev->pipe[pipe].ep_out;
+ 
+-    while (count) {
++    dev->active_calls++;
++    while (count && usb_dwc3_available(dev) && dev->pipe[pipe].ready) {
+         read = ringbuffer_read(p, count, host2device);
+         count -= read;
+         p += read;
+         recvd += read;
+         usb_dwc3_handle_events(dev);
+-        usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
++        if (usb_dwc3_available(dev))
++            usb_dwc3_cdc_start_bulk_out_xfer(dev, ep);
+     }
+ 
++    dev->active_calls--;
+     return recvd;
+ }
+ 
+ ssize_t usb_dwc3_can_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ {
+-    if (!dev || !dev->pipe[pipe].ready)
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX || !dev->pipe[pipe].ready)
+         return 0;
+ 
+     ringbuffer_t *host2device = dev->pipe[pipe].host2device;
+@@ -1425,8 +1519,7 @@ ssize_t usb_dwc3_can_read(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ 
+ bool usb_dwc3_can_write(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ {
+-    (void)pipe;
+-    if (!dev)
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX)
+         return false;
+ 
+     return dev->pipe[pipe].ready;
+@@ -1434,7 +1527,7 @@ bool usb_dwc3_can_write(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ 
+ void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ {
+-    if (!dev || !dev->pipe[pipe].ready)
++    if (!usb_dwc3_available(dev) || pipe >= CDC_ACM_PIPE_MAX || !dev->pipe[pipe].ready)
+         return;
+ 
+     ringbuffer_t *device2host = dev->pipe[pipe].device2host;
+@@ -1443,7 +1536,10 @@ void usb_dwc3_flush(dwc3_dev_t *dev, cdc_acm_pipe_id_t pipe)
+ 
+     u8 ep = dev->pipe[pipe].ep_in;
+ 
+-    while (ringbuffer_get_used(device2host) != 0 || dev->endpoints[ep].xfer_in_progress) {
++    dev->active_calls++;
++    while (usb_dwc3_available(dev) && dev->pipe[pipe].ready &&
++           (ringbuffer_get_used(device2host) != 0 || dev->endpoints[ep].xfer_in_progress)) {
+         usb_dwc3_handle_events(dev);
+     }
++    dev->active_calls--;
+ }
+diff --git a/src/usb_dwc3.h b/src/usb_dwc3.h
+index 6b23c7c..5fa67ea 100644
+--- a/src/usb_dwc3.h
++++ b/src/usb_dwc3.h
+@@ -14,8 +14,12 @@ typedef enum _cdc_acm_pipe_id_t {
+     CDC_ACM_PIPE_MAX
+ } cdc_acm_pipe_id_t;
+ 
++/* Takes DART ownership, including failed construction. */
+ dwc3_dev_t *usb_dwc3_init(uintptr_t regs, dart_dev_t *dart);
+-void usb_dwc3_shutdown(dwc3_dev_t *dev);
++/* False retains the device and all remaining resources. */
++bool usb_dwc3_shutdown(dwc3_dev_t *dev);
++bool usb_dwc3_owns_regs(uintptr_t regs);
++bool usb_dwc3_has_faults(void);
+ 
+ void usb_dwc3_handle_events(dwc3_dev_t *dev);
+ 
+diff --git a/src/usb_dwc3_regs.h b/src/usb_dwc3_regs.h
+index ab433e7..8dfc9d4 100644
+--- a/src/usb_dwc3_regs.h
++++ b/src/usb_dwc3_regs.h
+@@ -176,11 +176,11 @@
+ #define DWC3_GCTL_DSBLCLKGTNG      (1 << 0)
+ 
+ /* Global USB2 PHY Configuration Register */
+-#define DWC3_GUSB2PHYCFG_PHYSOFTRST (1 << 31)
++#define DWC3_GUSB2PHYCFG_PHYSOFTRST (1U << 31)
+ #define DWC3_GUSB2PHYCFG_SUSPHY     (1 << 6)
+ 
+ /* Global USB3 PIPE Control Register */
+-#define DWC3_GUSB3PIPECTL_PHYSOFTRST (1 << 31)
++#define DWC3_GUSB3PIPECTL_PHYSOFTRST (1U << 31)
+ #define DWC3_GUSB3PIPECTL_SUSPHY     (1 << 17)
+ 
+ /* Global TX Fifo Size Register */
+@@ -214,7 +214,7 @@
+ #define DWC3_DCFG_LPM_CAP (1 << 22)
+ 
+ /* Device Control Register */
+-#define DWC3_DCTL_RUN_STOP (1 << 31)
++#define DWC3_DCTL_RUN_STOP (1U << 31)
+ #define DWC3_DCTL_CSFTRST  (1 << 30)
+ #define DWC3_DCTL_LSFTRST  (1 << 29)
+ 
+@@ -373,7 +373,7 @@
+ #define DWC3_EP_MISSED_ISOC     (1 << 6)
+ 
+ /* This last one is specific to EP0 */
+-#define DWC3_EP0_DIR_IN (1 << 31)
++#define DWC3_EP0_DIR_IN (1U << 31)
+ 
+ enum dwc3_link_state {
+     /* In SuperSpeed */
+diff --git a/proxyclient/m1n1/hw/sep.py b/proxyclient/m1n1/hw/sep.py
+index f206a71..4b25510 100644
+--- a/proxyclient/m1n1/hw/sep.py
++++ b/proxyclient/m1n1/hw/sep.py
+@@ -70,6 +70,8 @@ class SEP:
+         self.asc = ASCRegs(self.u, self.sep_base)
+ 
+         self.dart_handle = self.p.dart_init(self.dart_base, 0)
++        if not self.dart_handle:
++            raise RuntimeError("SEP DART initialization failed; do not continue boot")
+ 
+         self.epnum2name = {}
+         self.epname2num = {}
+@@ -77,13 +79,17 @@ class SEP:
+ 
+     def map_sepfw(self):
+         sepfw_addr, sepfw_size = self.u.adt["/chosen/memory-map"].SEPFW
+-        self.p.dart_map(self.dart_handle, self.FW_IOVA, sepfw_addr, sepfw_size)
++        if self.p.dart_map(self.dart_handle, self.FW_IOVA, sepfw_addr, sepfw_size) != 0:
++            raise RuntimeError("SEP firmware mapping failed; retain memory and stop")
+ 
+     def unmap_sepfw(self):
+         _, sepfw_size = self.u.adt["/chosen/memory-map"].SEPFW
+-        self.p.dart_unmap(self.dart_handle, self.FW_IOVA, sepfw_size)
++        if self.p.dart_unmap(self.dart_handle, self.FW_IOVA, sepfw_size) != 1:
++            raise RuntimeError("SEP firmware unmap unconfirmed; retain memory and stop")
+ 
+     def create_shmem(self):
++        if getattr(self, "shmem", None):
++            raise RuntimeError("SEP shared memory already owned; do not replace it")
+         shmem = SEPShMem()
+ 
+         # PNIC - panic buffer
+@@ -99,7 +105,8 @@ class SEP:
+         sz = align_up(len(bfr), 0x4000)
+         self.shmem = self.u.heap.memalign(0x4000, 0x30000)
+         self.i.writemem(self.shmem, bfr)
+-        self.p.dart_map(self.dart_handle, self.SHMEM_IOVA, self.shmem, 0x30000)
++        if self.p.dart_map(self.dart_handle, self.SHMEM_IOVA, self.shmem, 0x30000) != 0:
++            raise RuntimeError("SEP shared memory mapping failed; retain allocation and stop")
+ 
+     def boot(self):
+         self.create_shmem()
+diff --git a/proxyclient/m1n1/proxy.py b/proxyclient/m1n1/proxy.py
+index 53291d3..bf25d01 100644
+--- a/proxyclient/m1n1/proxy.py
++++ b/proxyclient/m1n1/proxy.py
+@@ -1106,8 +1106,8 @@ class M1N1Proxy(Reloadable):
+     def tunables_apply_local_addr(self, path, prop, base):
+         return self.request(self.P_TUNABLES_APPLY_LOCAL, path, prop, base)
+ 
+-    def dart_init(self, base, sid, dart_type=DART.T8020):
+-        return self.request(self.P_DART_INIT, base, sid, dart_type)
++    def dart_init(self, base, sid, dart_type=DART.T8020, keep_pts=False):
++        return self.request(self.P_DART_INIT, base, sid, keep_pts, dart_type)
+     def dart_shutdown(self, dart):
+         return self.request(self.P_DART_SHUTDOWN, dart)
+     def dart_map(self, dart, iova, bfr, len):

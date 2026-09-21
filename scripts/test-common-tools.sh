@@ -71,4 +71,53 @@ evidence_write_sums "$missing_bundle" "$missing_bundle/SHA256SUMS"
 expect_fail "$project_root/scripts/verify-re-input.sh" --bundle "$missing_bundle"
 for name in clean.log; do report="$tmp/$name.report"; "$project_root/scripts/analyze-kernel-log.sh" --input "$project_root/tests/fixtures/kernel/$name" --report "$report"; done
 for name in panic.log dart-fault.log lockdep.log; do report="$tmp/$name.report"; expect_fail "$project_root/scripts/analyze-kernel-log.sh" --input "$project_root/tests/fixtures/kernel/$name" --report "$report"; done
+# Synthetic lines quote error text from the pinned Apple PMGR/DART drivers;
+# these exercise log validation only, never a device or driver C function.
+power_case=0
+while IFS= read -r line; do
+    power_case=$((power_case + 1))
+    printf '%s\n' "$line" >"$tmp/power-$power_case.log"
+    expect_fail evidence_scan_fault_log "$tmp/power-$power_case.log"
+    result=0
+    "$project_root/scripts/analyze-kernel-log.sh" --input "$tmp/power-$power_case.log" --report "$tmp/power-$power_case.report" || result=$?
+    [[ $result == 2 ]]
+    grep -Fx status=blocked "$tmp/power-$power_case.report" >/dev/null
+    grep -Fx matched_lines=1 "$tmp/power-$power_case.report" >/dev/null
+done <"$project_root/tests/fixtures/kernel/apple-power-faults.log"
+[[ $power_case == 7 ]]
+printf '%s\n' \
+    'apple-pmgr-pwrstate test-pmgr: PS test-domain: pwrstate = 0xf: 0xf' \
+    'apple-pmgr-pwrstate test-pmgr: PS 0x0: assert reset' \
+    'apple-pmgr-pwrstate test-pmgr: PS 0x0: deassert reset' \
+    'apple-dart test-dart: command completed' >"$tmp/power-clean.log"
+evidence_scan_fault_log "$tmp/power-clean.log"
+"$project_root/scripts/analyze-kernel-log.sh" --input "$tmp/power-clean.log" --report "$tmp/power-clean.report"
+grep -Fx status=clean "$tmp/power-clean.report" >/dev/null
+# A scanner I/O/tool failure is not the same as grep's no-match status.
+mkdir "$tmp/failing-tools"
+printf '#!/bin/sh\nexit 2\n' >"$tmp/failing-tools/grep"
+chmod 0755 "$tmp/failing-tools/grep"
+PATH="$tmp/failing-tools:$PATH" expect_fail evidence_scan_fault_log "$tmp/power-clean.log"
+expect_fail env PATH="$tmp/failing-tools:$PATH" "$project_root/scripts/analyze-kernel-log.sh" \
+    --input "$tmp/power-clean.log" --report "$tmp/must-not-publish.report"
+[[ ! -e $tmp/must-not-publish.report ]]
+# Guards must also reject invalid paths when a caller tests their return status
+# (a context where Bash disables implicit errexit within the function).
+ln -s "$tmp/power-clean.log" "$tmp/linked.log"
+expect_fail evidence_abs_regular "$tmp/linked.log"
+expect_fail evidence_scan_fault_log "$tmp/linked.log"
+expect_fail evidence_abs_regular tests/fixtures/kernel/clean.log
+expect_fail evidence_scan_fault_log tests/fixtures/kernel/clean.log
+expect_fail evidence_scan_fault_log "$tmp/missing.log"
+# Caller readonly names must not collide with helper locals (notably Bash 3.2).
+(
+    readonly source="$tmp/atomic-source" destination="$tmp/atomic-destination"
+    mkdir "$source"
+    printf preserved >"$source/marker"
+    evidence_atomic_publish_directory "$source" "$destination"
+    [[ ! -e $source && $(cat "$destination/marker") == preserved ]]
+    mkdir "$source"
+    expect_fail evidence_atomic_publish_directory "$source" "$destination"
+    [[ -d $source && $(cat "$destination/marker") == preserved ]]
+)
 printf 'common-tools=passed\n'

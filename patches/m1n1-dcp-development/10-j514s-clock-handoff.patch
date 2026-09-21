@@ -1,0 +1,97 @@
+diff --git a/src/kboot.c b/src/kboot.c
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -1961,7 +1961,82 @@
+     // used on M1 Pro/Max/Ultra, mapped to dcp and disp0
+     {"region-id-157", "region157", true, true, false},
+ };
++
++static int dt_set_display_clocks(void)
++{
++    /* Metadata only. Activation and retained mappings are separate work. */
++    if (fdt_node_check_compatible(dt, 0, "apple,j514s"))
++        return 0;
++    const char *alias = fdt_get_alias(dt, "dcp");
++    if (!alias)
++        return 0; /* Older trees have no DCP topology. */
++
++    if (fdt_node_check_compatible(dt, 0, "apple,t6030") ||
++        os_firmware.version != V14_7 || !adt_is_compatible(adt, 0, "J514sAP") ||
++        !adt_is_compatible(adt, 0, "Mac15,6"))
++        bail("FDT: unverified display clock target\n");
++
++    int arm_io = adt_path_offset(adt, "/arm-io");
++    int disp = adt_path_offset(adt, "/arm-io/disp0");
++    if (arm_io < 0 || disp < 0 || !adt_is_compatible(adt, arm_io, "arm-io,t6030") ||
++        !adt_is_compatible(adt, disp, "disp0,t6030"))
++        bail("ADT: missing display clock provider\n");
+ 
++    u32 ids_len, freq_len, kinds_len;
++    const u32 *ids = adt_getprop(adt, disp, "clock-ids", &ids_len);
++    const u32 *freq = adt_getprop(adt, arm_io, "clock-frequencies", &freq_len);
++    const u32 *kinds = adt_getprop(adt, arm_io, "clock-frequencies-nclk", &kinds_len);
++    if (!ids || ids_len != 2 * sizeof(u32) || ids[0] != 348 || ids[1] != 412 ||
++        !freq || !kinds || !freq_len || freq_len % sizeof(u32) || freq_len != kinds_len)
++        bail("ADT: invalid display clock table\n");
++    for (u32 i = 0; i < kinds_len / sizeof(u32); i++) {
++        if (kinds[i] > 3)
++            bail("ADT: invalid display clock type\n");
++    }
++
++    int node = fdt_path_offset(dt, alias);
++    int len;
++    if (node < 0 || fdt_node_check_compatible(dt, node, "apple,t6030-dcp"))
++        bail("FDT: invalid display clock consumer\n");
++    const char *status = fdt_getprop(dt, node, "status", &len);
++    if (!status || len != sizeof("disabled") || memcmp(status, "disabled", len))
++        bail("FDT: display must remain disabled\n");
++    if (fdt_stringlist_count(dt, node, "clock-names") != 2 ||
++        fdt_stringlist_search(dt, node, "clock-names", "pixel") != 0 ||
++        fdt_stringlist_search(dt, node, "clock-names", "video") != 1)
++        bail("FDT: invalid display clock names\n");
++    const fdt32_t *clocks = fdt_getprop(dt, node, "clocks", &len);
++    if (!clocks || len != 2 * sizeof(fdt32_t) || clocks[0] == clocks[1])
++        bail("FDT: invalid display clock references\n");
++
++    void *properties[2];
++    fdt32_t rates[2];
++    for (unsigned i = 0; i < 2; i++) {
++        int clock = fdt_node_offset_by_phandle(dt, fdt32_to_cpu(clocks[i]));
++        if (clock < 0 || fdt_node_check_compatible(dt, clock, "fixed-clock"))
++            bail("FDT: missing fixed display clock\n");
++        const fdt32_t *cells = fdt_getprop(dt, clock, "#clock-cells", &len);
++        if (!cells || len != sizeof(fdt32_t) || *cells)
++            bail("FDT: invalid display clock cells\n");
++        status = fdt_getprop(dt, clock, "status", &len);
++        if (!status || len != sizeof("disabled") || memcmp(status, "disabled", len))
++            bail("FDT: display clock must remain disabled\n");
++        properties[i] = fdt_getprop_w(dt, clock, "clock-frequency", &len);
++        if (!properties[i] || len != sizeof(fdt32_t))
++            bail("FDT: missing display clock rate placeholder\n");
++        u32 index = ids[i] - 256;
++        rates[i] = cpu_to_fdt32(index < freq_len / sizeof(u32) ? freq[index] : 0);
++    }
++
++    /* All validation is complete. Same-size writes cannot move FDT offsets
++     * or run out of space; neither a missing table nor partial validation
++     * publishes a fabricated zero rate. Keep both providers disabled.
++     */
++    memcpy(properties[0], &rates[0], sizeof(rates[0]));
++    memcpy(properties[1], &rates[1], sizeof(rates[1]));
++    return 0;
++}
++
+ static int dt_set_display(void)
+ {
+     /* lock dart-disp0 to prevent old software from resetting it */
+@@ -2844,6 +2919,8 @@
+         return -1;
+     if (dt_set_pcie_tunables())
+         return -1;
++    if (dt_set_display_clocks())
++        return -1;
+     if (dt_set_display())
+         return -1;
+     if (dt_set_gpu(dt))
+
+

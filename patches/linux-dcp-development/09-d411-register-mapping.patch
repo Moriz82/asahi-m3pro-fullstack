@@ -1,0 +1,29 @@
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 0931f11..5c9912c 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -472,9 +472,21 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
+ 	} else {
+ 		struct resource *rsrc = dcp->disp_registers[req->index];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-		dma_addr_t dva = dma_map_resource(dcp->dev, rsrc->start, resource_size(rsrc),
+-						  DMA_BIDIRECTIONAL, 0);
+-		WARN_ON(dva == DMA_MAPPING_ERROR);
++		dma_addr_t dva;
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++		/* 23J220 ServiceRelay uses bit 31 to request a DCP DMA mapping.
++		 * Direct-register mode returns the physical address in both fields.
++		 */
++		if (!(req->flags & BIT(31))) {
++			dva = rsrc->start;
++		} else
++#endif
++		{
++			dva = dma_map_resource(dcp->dev, rsrc->start, resource_size(rsrc),
++					       DMA_BIDIRECTIONAL, 0);
++			if (dma_mapping_error(dcp->dev, dva))
++				return (struct DCP_FW_NAME(dcp_map_reg_resp)){ .ret = 1 };
++		}
+ #endif
+ 
+ 		return (struct DCP_FW_NAME(dcp_map_reg_resp)){

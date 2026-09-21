@@ -1,0 +1,196 @@
+Subject: [PATCH 17] drm/apple: preserve 23J220 display callback metadata
+
+Development-only against 77cb8f24c2381a8abb7272d7bbdec548d6426a8a and the preceding
+selected development patches. Exact firmware/host D006 is 60/56 bytes;
+D576 is 88/76 bytes. Preserve values/opaque metadata in in/out replies,
+acknowledge frame property flags, and validate target sizes before dispatch.
+Metadata receipt only: brightness policy and multi-pipe tiling remain absent.
+Older layouts are retained. No boot-builder or hardware enablement change.
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 9a64abf..3a54a58 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -307,6 +307,15 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 		dev_warn(dev, "Invalid display clock callback size\n");
+ 		return;
+ 	}
++	/* 23J220 in/out metadata callbacks overwrite firmware-owned values. */
++	if (dcp->fw_compat == DCP_FIRMWARE_V_14_7 &&
++	    ((tag == 6 && (hdr->in_len != 60 || hdr->out_len != 56 ||
++			   length != sizeof(*hdr) + 60 + 56)) ||
++	     (tag == 576 && (hdr->in_len != 88 || hdr->out_len != 76 ||
++			     length != sizeof(*hdr) + 88 + 76)))) {
++		dev_warn(dev, "Invalid display metadata callback size\n");
++		return;
++	}
+ 	/* 23J220 D589 has 34-byte data, eight 216-byte records and flags. */
+ 	if (tag == 589 && dcp->fw_compat == DCP_FIRMWARE_V_14_7 &&
+ 	    (hdr->in_len != 1776 || hdr->out_len != 0 ||
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index ae6e0fd..3b401ba 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -118,20 +118,6 @@ struct dcp_allocate_bandwidth_resp {
+ 	u32 ret;
+ } __packed;
+ 
+-struct frame_sync_props {
+-	u8 unk[28];
+-};
+-
+-struct dcp_set_frame_sync_props_req {
+-	struct frame_sync_props props;
+-	u8 frame_sync_props_null;
+-	u8 padding[3];
+-} __packed;
+-
+-struct dcp_set_frame_sync_props_resp {
+-	struct frame_sync_props props;
+-} __packed;
+-
+ /* Method calls */
+ 
+ enum dcpep_method {
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 5587be1..b947a88 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -733,11 +733,24 @@ static struct DCP_FW_NAME(dcp_rt_bandwidth) dcpep_cb_rt_bandwidth(struct apple_d
+ 	return rt_bw;
+ }
+ 
+-static struct dcp_set_frame_sync_props_resp
++static struct DCP_FW_NAME(dcp_set_frame_sync_props_resp)
+ dcpep_cb_set_frame_sync_props(struct apple_dcp *dcp,
+-			      struct dcp_set_frame_sync_props_req *req)
++			      struct DCP_FW_NAME(dcp_set_frame_sync_props_req) *req)
+ {
+-	return (struct dcp_set_frame_sync_props_resp){};
++	struct DCP_FW_NAME(dcp_set_frame_sync_props_resp) resp = {};
++
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++	if (!req->frame_sync_props_null) {
++		resp.props = req->props;
++		/* Metadata receipt only: no brightness policy or hardware write. */
++		for (unsigned int i = 0; i < 11; i++)
++			if (resp.props.updated[i])
++				dev_dbg(dcp->dev, "frame sync property %u: %u\n",
++					i, resp.props.values[i]);
++		memset(resp.props.updated, 0, sizeof(resp.props.updated));
++	}
++#endif
++	return resp;
+ }
+ 
+ /* Callback to get the current time as milliseconds since the UNIX epoch */
+@@ -1087,6 +1100,23 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
+ 	}
+ }
+ 
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++static struct DCP_FW_NAME(dcp_hotplug_resp)
++dcpep_cb_hotplug_metadata(struct apple_dcp *dcp,
++			 struct DCP_FW_NAME(dcp_hotplug_req) *req)
++{
++	struct DCP_FW_NAME(dcp_hotplug_resp) resp = {};
++	u64 connected = req->connected;
++
++	/* Opaque in/out metadata must survive even an ignored hotplug event. */
++	if (!req->tiled_display_null)
++		memcpy(resp.tiled_display, req->tiled_display,
++		       sizeof(resp.tiled_display));
++	dcpep_cb_hotplug(dcp, &connected);
++	return resp;
++}
++#endif
++
+ static void
+ dcpep_cb_swap_complete_intent_gated(struct apple_dcp *dcp,
+ 				    struct dcp_swap_complete_intent_gated *info)
+@@ -1154,8 +1184,8 @@ TRAMPOLINE_INOUT(trampoline_allocate_bandwidth, dcpep_cb_allocate_bandwidth,
+ TRAMPOLINE_OUT(trampoline_rt_bandwidth, dcpep_cb_rt_bandwidth,
+ 	       struct DCP_FW_NAME(dcp_rt_bandwidth));
+ TRAMPOLINE_INOUT(trampoline_set_frame_sync_props, dcpep_cb_set_frame_sync_props,
+-	       struct dcp_set_frame_sync_props_req,
+-	       struct dcp_set_frame_sync_props_resp);
++	       struct DCP_FW_NAME(dcp_set_frame_sync_props_req),
++	       struct DCP_FW_NAME(dcp_set_frame_sync_props_resp));
+ #if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
+ TRAMPOLINE_INOUT(trampoline_get_frequency, dcpep_cb_get_frequency,
+ 		 struct dcp_get_frequency_req, u64);
+@@ -1163,7 +1193,13 @@ TRAMPOLINE_INOUT(trampoline_get_frequency, dcpep_cb_get_frequency,
+ TRAMPOLINE_OUT(trampoline_get_frequency, dcpep_cb_get_frequency, u64);
+ #endif
+ TRAMPOLINE_OUT(trampoline_get_time, dcpep_cb_get_time, u64);
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++TRAMPOLINE_INOUT(trampoline_hotplug, dcpep_cb_hotplug_metadata,
++	       struct DCP_FW_NAME(dcp_hotplug_req),
++	       struct DCP_FW_NAME(dcp_hotplug_resp));
++#else
+ TRAMPOLINE_IN(trampoline_hotplug, dcpep_cb_hotplug, u64);
++#endif
+ TRAMPOLINE_IN(trampoline_swap_complete_intent_gated,
+ 	      dcpep_cb_swap_complete_intent_gated,
+ 	      struct dcp_swap_complete_intent_gated);
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index aab131c..8386241 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -17,6 +17,42 @@
+ #include "plane.h"
+ #include "version_utils.h"
+ 
++struct DCP_FW_NAME(frame_sync_props) {
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++	/* 23J220: eleven u32 properties followed by eleven update flags. */
++	u32 values[11];
++	u8 updated[11];
++	u8 reserved;
++#else
++	u8 unk[28];
++#endif
++} __packed;
++
++struct DCP_FW_NAME(dcp_set_frame_sync_props_req) {
++	struct DCP_FW_NAME(frame_sync_props) props;
++	u8 frame_sync_props_null;
++	u8 padding[3];
++} __packed;
++
++struct DCP_FW_NAME(dcp_set_frame_sync_props_resp) {
++	struct DCP_FW_NAME(frame_sync_props) props;
++} __packed;
++
++#if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
++struct DCP_FW_NAME(dcp_hotplug_req) {
++	u64 connected;
++	u8 tiled_display[75];
++	u8 unkbool;
++	u8 tiled_display_null;
++	u8 padding[3];
++} __packed;
++
++struct DCP_FW_NAME(dcp_hotplug_resp) {
++	u8 tiled_display[75];
++	u8 padding;
++} __packed;
++#endif
++
+ struct DCP_FW_NAME(dcp_swap_start_req) {
+ 	u32 swap_id;
+ #if DCP_FW_VER == DCP_FW_VERSION(14, 7, 0)
+diff --git a/drivers/gpu/drm/apple/iomfb_v14_7.c b/drivers/gpu/drm/apple/iomfb_v14_7.c
+index 810cdd5..b566dff 100644
+--- a/drivers/gpu/drm/apple/iomfb_v14_7.c
++++ b/drivers/gpu/drm/apple/iomfb_v14_7.c
+@@ -44,8 +44,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[1] = trampoline_true, /* did_power_on_signal */
+ 	[2] = trampoline_nop, /* will_power_off_signal */
+ 	[3] = trampoline_rt_bandwidth,
+-	// [6] = trampoline_set_frame_sync_props,
+-	[6] = trampoline_nop,
++	[6] = trampoline_set_frame_sync_props,
+ 	[100] = iomfbep_cb_match_pmu_service,
+ 	[101] = trampoline_zero, /* get_display_default_stride */
+ 	[102] = trampoline_nop, /* set_number_property */

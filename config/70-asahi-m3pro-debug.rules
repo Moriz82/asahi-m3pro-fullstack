@@ -1,0 +1,10 @@
+# Linux desktop only. Matches the m1n1 USB IDs; these are not authenticated identity.
+# Suppress ModemManager probes for both m1n1 CDC ports. Grant active-seat access
+# and a convenient name only to secondary console interface 02, not proxy 00.
+SUBSYSTEM!="tty", GOTO="asahi_debug_end"
+ATTRS{idVendor}=="1209", ATTRS{idProduct}=="316d", GOTO="asahi_debug_match"
+GOTO="asahi_debug_end"
+LABEL="asahi_debug_match"
+ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+ATTRS{bInterfaceNumber}=="02", KERNEL=="ttyACM*", SYMLINK+="m1n1-sec", TAG+="uaccess"
+LABEL="asahi_debug_end"

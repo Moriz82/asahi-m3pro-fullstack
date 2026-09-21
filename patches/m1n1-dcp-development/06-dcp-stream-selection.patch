@@ -1,0 +1,24 @@
+diff --git a/proxyclient/m1n1/fw/asc/__init__.py b/proxyclient/m1n1/fw/asc/__init__.py
+--- a/proxyclient/m1n1/fw/asc/__init__.py
++++ b/proxyclient/m1n1/fw/asc/__init__.py
+@@ -54,7 +54,7 @@
+             return addr
+         dva = self.dva_offset | self.dart.iomap(self.stream, addr, size)
+ 
+-        self.dart.invalidate_streams(1)
++        self.dart.invalidate_streams(1 << self.stream)
+         return dva
+ 
+     def ioalloc(self, size):
+diff --git a/proxyclient/m1n1/fw/dcp/client.py b/proxyclient/m1n1/fw/dcp/client.py
+--- a/proxyclient/m1n1/fw/dcp/client.py
++++ b/proxyclient/m1n1/fw/dcp/client.py
+@@ -11,6 +11,6 @@
+         0x37: DCPEndpoint,
+     }
+ 
+-    def __init__(self, u, asc_base, dart=None, disp_dart=None):
+-        super().__init__(u, asc_base, dart)
++    def __init__(self, u, asc_base, dart=None, disp_dart=None, stream=0):
++        super().__init__(u, asc_base, dart, stream=stream)
+         self.disp_dart = disp_dart

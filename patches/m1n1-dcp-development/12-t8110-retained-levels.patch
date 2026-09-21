@@ -1,0 +1,464 @@
+From: M3 Pro development program
+Subject: [PATCH] m1n1: preserve and traverse retained T8110 table levels
+
+Development-only C hierarchy and lifetime prerequisite. Retained mode and
+reported geometry select the walker; fresh contexts keep their old mode.
+No target region selection, RTKit DVA widening or hardware activation.
+
+diff --git a/src/dart.c b/src/dart.c
+index a54886d..eccb134 100644
+--- a/src/dart.c
++++ b/src/dart.c
+@@ -67,6 +67,7 @@
+ #define DART_T8110_TCR_OFF              0x1000
+ #define DART_T8110_TCR_REMAP            GENMASK(11, 8)
+ #define DART_T8110_TCR_REMAP_EN         BIT(7)
++#define DART_T8110_TCR_FOUR_LEVEL       BIT(3)
+ #define DART_T8110_TCR_BYPASS_DAPF      BIT(2)
+ #define DART_T8110_TCR_BYPASS_DART      BIT(1)
+ #define DART_T8110_TCR_TRANSLATE_ENABLE BIT(0)
+@@ -84,6 +85,13 @@
+ #define DART_T8110_ENABLE_STREAMS  0xc00
+ #define DART_T8110_DISABLE_STREAMS 0xc20
+ 
++#define DART_T8110_PARAMS1            0x00
++#define DART_T8110_PARAMS1_PAGE_SHIFT GENMASK(27, 24)
++#define DART_T8110_PARAMS3            0x08
++#define DART_T8110_PARAMS3_VA_WIDTH   GENMASK(21, 16)
++#define DART_T8110_PARAMS3_PA_WIDTH   GENMASK(29, 24)
++#define DART_T8110_PTE_OFFSET         GENMASK(37, 10)
++
+ #define DART_MAX_TTBR_COUNT 4
+ 
+ #define DART_TCR(dart) (dart->regs + dart->params->tcr_off + 4 * dart->device)
+@@ -112,6 +120,8 @@ struct dart_params {
+ struct dart_dev {
+     bool locked;
+     bool keep;
++    bool four_levels;
++    u8 iova_bits;
+     uintptr_t regs;
+     u8 device;
+     enum dart_type_t type;
+@@ -181,7 +191,7 @@ const struct dart_params dart_t8110 = {
+     .sid_count = 256,
+     .pte_flags =
+         FIELD_PREP(DART_PTE_SP_END, 0xfff) | FIELD_PREP(DART_PTE_SP_START, 0) | DART_PTE_VALID,
+-    .offset_mask = DART_T6000_PTE_OFFSET,
++    .offset_mask = DART_T8110_PTE_OFFSET,
+     .tcr_enabled = DART_T8110_TCR_TRANSLATE_ENABLE,
+     .tcr_disabled = DART_T8110_TCR_BYPASS_DAPF | DART_T8110_TCR_BYPASS_DART,
+     .tcr_off = DART_T8110_TCR_OFF,
+@@ -235,6 +245,30 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
+ 
+     dart->keep = keep_pts;
+ 
++    /* Retained T8110 tables must be walked in their existing mode. The
++     * hardware's level count includes the TTBR, so FOUR_LEVEL adds one
++     * memory table above the usual two. Fresh contexts still use two.
++     */
++    if (type == DART_T8110 && (dart->locked || keep_pts)) {
++        u32 tcr = read32(DART_TCR(dart));
++        if (tcr & DART_T8110_TCR_FOUR_LEVEL) {
++            u32 params1 = read32(base + DART_T8110_PARAMS1);
++            u32 params3 = read32(base + DART_T8110_PARAMS3);
++            u32 bits = FIELD_GET(DART_T8110_PARAMS3_VA_WIDTH, params3);
++            if (!(tcr & DART_T8110_TCR_TRANSLATE_ENABLE) ||
++                (tcr & (DART_T8110_TCR_BYPASS_DART | DART_T8110_TCR_REMAP_EN)) ||
++                FIELD_GET(DART_T8110_PARAMS1_PAGE_SHIFT, params1) != 14 ||
++                FIELD_GET(DART_T8110_PARAMS3_PA_WIDTH, params3) != 42 ||
++                bits <= 36 || bits > 47) {
++                printf("dart: unsupported retained four-level configuration\n");
++                free(dart);
++                return NULL;
++            }
++            dart->four_levels = true;
++            dart->iova_bits = bits;
++        }
++    }
++
+     if (dart->locked || keep_pts) {
+         for (int i = 0; i < dart->params->ttbr_count; i++) {
+             u32 ttbr = read32(DART_TTBR(dart, i));
+@@ -353,7 +387,7 @@ dart_dev_t *dart_init_adt(const char *path, int instance, int device, bool keep_
+         }
+     }
+     if (dart->locked)
+-        dart->vm_base &= (1LLU << 36) - 1;
++        dart->vm_base &= (1LLU << (dart->four_levels ? dart->iova_bits : 36)) - 1;
+ 
+     return dart;
+ }
+@@ -438,6 +472,13 @@ int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_
+     snprintf(l2_tt_str, sizeof(l2_tt_str), "l2-tt-%d", device);
+ 
+     const struct adt_property *pt_region = adt_get_property(adt, node, pt_region_str);
++    if (dart->four_levels && pt_region) {
++        /* This legacy preallocation format describes only two table levels.
++         * Do not reinterpret it as a four-level root or repair its entries.
++         */
++        printf("dart: four-level %s preallocation is not supported\n", pt_region_str);
++        return DART_ERR_UNSUPPORTED_PT_REGION;
++    }
+     if (pt_region && pt_region->size == 16) {
+         u64 region[2];
+         memcpy(region, pt_region->value, sizeof(region));
+@@ -509,36 +550,58 @@ int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_
+     return 0;
+ }
+ 
+-static u64 *dart_get_l2(dart_dev_t *dart, u32 idx)
++static u64 dart_iova_limit(dart_dev_t *dart)
+ {
+-    int ttbr = idx >> 11;
+-    idx &= 0x7ff;
++    return dart->four_levels ? 1ULL << dart->iova_bits : (u64)dart->params->ttbr_count << 36;
++}
+ 
+-    if (dart->l1[ttbr][idx] & DART_PTE_VALID) {
+-        u64 off = FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][idx])
+-                  << DART_PTE_OFFSET_SHIFT;
+-        return (u64 *)off;
+-    }
++static u64 *dart_pte_table(dart_dev_t *dart, u64 pte)
++{
++    return (u64 *)(FIELD_GET(dart->params->offset_mask, pte) << DART_PTE_OFFSET_SHIFT);
++}
+ 
++static u64 *dart_next_table(dart_dev_t *dart, u64 *pte, bool create)
++{
++    if (*pte & DART_PTE_VALID)
++        return dart_pte_table(dart, *pte);
++    if (!create)
++        return NULL;
+     u64 *tbl = memalign(SZ_16K, SZ_16K);
+     if (!tbl)
+         return NULL;
+-
+-    memset(tbl, 0, SZ_16K);
+-
+     u64 offset = FIELD_PREP(dart->params->offset_mask, ((u64)tbl) >> DART_PTE_OFFSET_SHIFT);
++    if (dart_pte_table(dart, offset) != tbl) {
++        free(tbl);
++        return NULL;
++    }
++    memset(tbl, 0, SZ_16K);
++    *pte = offset | DART_PTE_VALID;
++    return tbl;
++}
+ 
+-    dart->l1[ttbr][idx] = offset | DART_PTE_VALID;
++static u64 *dart_get_l1(dart_dev_t *dart, uintptr_t iova, bool create)
++{
++    if (iova >= dart_iova_limit(dart))
++        return NULL;
++    u64 *root = dart->l1[dart->four_levels ? 0 : iova >> 36];
++    if (!root || !dart->four_levels)
++        return root;
++    return dart_next_table(dart, &root[(iova >> 36) & 0x7ff], create);
++}
+ 
+-    return tbl;
++static u64 *dart_get_l2(dart_dev_t *dart, uintptr_t iova, bool create)
++{
++    u64 *l1 = dart_get_l1(dart, iova, create);
++    if (!l1)
++        return NULL;
++    return dart_next_table(dart, &l1[(iova >> 25) & 0x7ff], create);
+ }
+ 
+ static int dart_map_page(dart_dev_t *dart, uintptr_t iova, uintptr_t paddr, u32 flags)
+ {
+-    u32 l1_index = (iova >> 25) & 0x1fff;
+     u32 l2_index = (iova >> 14) & 0x7ff;
+ 
+-    u64 *l2 = dart_get_l2(dart, l1_index);
++    u64 *l2 = dart_get_l2(dart, iova, true);
+     if (!l2) {
+         printf("dart: couldn't create l2 for iova %lx\n", iova);
+         return -1;
+@@ -567,6 +630,12 @@ int dart_map_flags(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len, u32
+         return -1;
+     if (iova % SZ_16K)
+         return -1;
++    u64 limit = dart_iova_limit(dart);
++    u64 physical_limit = (FIELD_GET(dart->params->offset_mask, dart->params->offset_mask) + 1)
++                         << DART_PTE_OFFSET_SHIFT;
++    if (iova >= limit || len > limit - iova || paddr >= physical_limit ||
++        len > physical_limit - paddr)
++        return -1;
+ 
+     while (offset < len) {
+         int ret = dart_map_page(dart, iova + offset, paddr + offset, flags);
+@@ -590,15 +659,10 @@ int dart_map(dart_dev_t *dart, uintptr_t iova, void *bfr, size_t len)
+ 
+ static void dart_unmap_page(dart_dev_t *dart, uintptr_t iova)
+ {
+-    u32 ttbr = (iova >> 36) & 0x3;
+-    u32 l1_index = (iova >> 25) & 0x7ff;
+     u32 l2_index = (iova >> 14) & 0x7ff;
+-
+-    if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
+-        return;
+-
+-    u64 *l2 = dart_get_l2(dart, l1_index);
+-    l2[l2_index] = 0;
++    u64 *l2 = dart_get_l2(dart, iova, false);
++    if (l2)
++        l2[l2_index] = 0;
+ }
+ 
+ void dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len)
+@@ -607,6 +671,9 @@ void dart_unmap(dart_dev_t *dart, uintptr_t iova, size_t len)
+         return;
+     if (iova % SZ_16K)
+         return;
++    u64 limit = dart_iova_limit(dart);
++    if (iova >= limit || len > limit - iova)
++        return;
+ 
+     while (len) {
+         dart_unmap_page(dart, iova);
+@@ -625,13 +692,14 @@ void dart_free_l2(dart_dev_t *dart, uintptr_t iova)
+         return;
+     }
+ 
+-    u32 ttbr = (iova >> 36) & 0x3;
+     u32 l1_index = (iova >> 25) & 0x7ff;
+-
+-    if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
++    u64 *l1 = dart_get_l1(dart, iova, false);
++    if (!l1 || !(l1[l1_index] & DART_PTE_VALID))
+         return;
+ 
+-    u64 *l2 = dart_get_l2(dart, l1_index);
++    u64 *l2 = dart_pte_table(dart, l1[l1_index]);
++    if (!is_heap(l2))
++        return; /* Retained firmware tables are not ours to free. */
+ 
+     for (u32 idx = 0; idx < 2048; idx++) {
+         if (l2[idx] & DART_PTE_VALID) {
+@@ -639,41 +707,18 @@ void dart_free_l2(dart_dev_t *dart, uintptr_t iova)
+             return;
+         }
+     }
+-    dart->l1[ttbr][l1_index] = 0;
++    l1[l1_index] = 0;
++    dart->params->tlb_invalidate(dart);
+     free(l2);
+ }
+ 
+ static void *dart_translate_internal(dart_dev_t *dart, uintptr_t iova, int silent)
+ {
+-    u64 ttbr = iova >> 36;
+-    u32 l1_index = (iova >> 25) & 0x7ff;
+-
+-    if (ttbr >= (unsigned)dart->params->ttbr_count) {
+-        printf("dart[%lx %u]: ttbr out of range: %llu\n", dart->regs, dart->device,
+-               (unsigned long long)ttbr);
+-        return NULL;
+-    }
+-
+-    if (!dart->l1[ttbr]) {
+-        printf("dart[%lx %u]: l1[%u] is not set\n", dart->regs, dart->device, (unsigned)ttbr);
+-        return NULL;
+-    }
+-
+-    if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID)) {
+-        if (!silent)
+-            printf("dart[%lx %u]: l1 translation failure %x %lx\n", dart->regs, dart->device,
+-                   l1_index, iova);
+-        return NULL;
+-    }
+-
+     u32 l2_index = (iova >> 14) & 0x7ff;
+-    u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][l1_index])
+-                      << DART_PTE_OFFSET_SHIFT);
+-
+-    if (!(l2[l2_index] & DART_PTE_VALID)) {
++    u64 *l2 = dart_get_l2(dart, iova, false);
++    if (!l2 || !(l2[l2_index] & DART_PTE_VALID)) {
+         if (!silent)
+-            printf("dart[%lx %u]: l2 translation failure %x:%x %lx\n", dart->regs, dart->device,
+-                   l1_index, l2_index, iova);
++            printf("dart[%lx %u]: translation failure %lx\n", dart->regs, dart->device, iova);
+         return NULL;
+     }
+ 
+@@ -694,47 +739,60 @@ void *dart_translate_silent(dart_dev_t *dart, uintptr_t iova)
+     return dart_translate_internal(dart, iova, 1);
+ }
+ 
+-u64 dart_search(dart_dev_t *dart, void *paddr)
++static u64 dart_search_table(dart_dev_t *dart, u64 *table, u32 shift, u64 base, void *paddr)
+ {
+-    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr) {
+-        if (!dart->l1[ttbr])
++    for (u32 index = 0; index < SZ_16K / sizeof(u64); index++) {
++        u64 iova = base | ((u64)index << shift);
++        if (iova >= dart_iova_limit(dart))
++            break;
++        if (!(table[index] & DART_PTE_VALID))
+             continue;
+-        for (u32 l1_index = 0; l1_index < SZ_16K / sizeof(u64); l1_index++) {
+-            if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
+-                continue;
+-
+-            u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][l1_index])
+-                              << DART_PTE_OFFSET_SHIFT);
+-            for (u32 l2_index = 0; l2_index < SZ_16K / sizeof(u64); l2_index++) {
+-                if (!(l2[l2_index] & DART_PTE_VALID))
+-                    continue;
+-                u64 *dst = (u64 *)(FIELD_GET(dart->params->offset_mask, l2[l2_index])
+-                                   << DART_PTE_OFFSET_SHIFT);
+-                if (dst == paddr)
+-                    return ((u64)ttbr << 36) | ((u64)l1_index << 25) | (l2_index << 14);
+-            }
++        u64 *next = dart_pte_table(dart, table[index]);
++        if (shift == 14) {
++            if (next == paddr)
++                return iova;
++        } else if (next) {
++            u64 found = dart_search_table(dart, next, shift - 11, iova, paddr);
++            if (!DART_IS_ERR(found))
++                return found;
+         }
+     }
++    return DART_PTR_ERR;
++}
+ 
++u64 dart_search(dart_dev_t *dart, void *paddr)
++{
++    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ttbr++) {
++        if (!dart->l1[ttbr])
++            continue;
++        u64 found = dart_search_table(dart, dart->l1[ttbr], dart->four_levels ? 36 : 25,
++                                     (u64)ttbr << 36, paddr);
++        if (!DART_IS_ERR(found))
++            return found;
++    }
+     return DART_PTR_ERR;
+ }
+ 
+ u64 dart_find_iova(dart_dev_t *dart, s64 start, size_t len)
+ {
+-    if (len % SZ_16K)
++    if (!len || len % SZ_16K)
+         return -1;
+     if (start < 0 || start % SZ_16K)
+         return -1;
+ 
+-    uintptr_t end = 1LLU << 36;
++    uintptr_t end = dart_iova_limit(dart);
+     uintptr_t iova = start;
++    if (iova >= end || len > end - iova)
++        return DART_PTR_ERR;
+ 
+-    while (iova + len <= end) {
++    while (iova <= end - len) {
+ 
+-        if (dart_translate_internal(dart, iova, 1) == NULL) {
++        u64 *l2 = dart_get_l2(dart, iova, false);
++        if (!l2 || !(l2[(iova >> 14) & 0x7ff] & DART_PTE_VALID)) {
+             size_t size;
+             for (size = SZ_16K; size < len; size += SZ_16K) {
+-                if (dart_translate_internal(dart, iova + size, 1) != NULL)
++                l2 = dart_get_l2(dart, iova + size, false);
++                if (l2 && (l2[((iova + size) >> 14) & 0x7ff] & DART_PTE_VALID))
+                     break;
+             }
+             if (size == len)
+@@ -748,6 +806,26 @@ u64 dart_find_iova(dart_dev_t *dart, s64 start, size_t len)
+     return DART_PTR_ERR;
+ }
+ 
++static void dart_release_tables(dart_dev_t *dart, u64 *table, unsigned levels)
++{
++    if (levels == 1)
++        return; /* Leaf entries name physical buffers, not allocated tables. */
++    unsigned entries = levels == 3 ? 1U << (dart->iova_bits - 36) : SZ_16K / sizeof(u64);
++    for (unsigned i = 0; i < entries; i++) {
++        if (!(table[i] & DART_PTE_VALID))
++            continue;
++        u64 *child = dart_pte_table(dart, table[i]);
++        if (!child)
++            continue;
++        dart_release_tables(dart, child, levels - 1);
++        if (is_heap(child)) {
++            table[i] = 0;
++            dart->params->tlb_invalidate(dart);
++            free(child);
++        }
++    }
++}
++
+ void dart_shutdown(dart_dev_t *dart)
+ {
+     if (!dart->locked && !dart->keep)
+@@ -757,17 +835,9 @@ void dart_shutdown(dart_dev_t *dart)
+         if (is_heap(dart->l1[i]))
+             write32(DART_TTBR(dart, i), 0);
+ 
+-    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr) {
+-        for (int i = 0; i < SZ_16K / 8; ++i) {
+-            if (dart->l1[ttbr][i] & DART_PTE_VALID) {
+-                void *l2 = dart_get_l2(dart, i);
+-                if (is_heap(l2)) {
+-                    free(l2);
+-                    dart->l1[ttbr][i] = 0;
+-                }
+-            }
+-        }
+-    }
++    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr)
++        if (dart->l1[ttbr])
++            dart_release_tables(dart, dart->l1[ttbr], dart->four_levels ? 3 : 2);
+ 
+     dart->params->tlb_invalidate(dart);
+ 
+diff --git a/src/dart.h b/src/dart.h
+index cc91f14..e6fc385 100644
+--- a/src/dart.h
++++ b/src/dart.h
+@@ -7,6 +7,7 @@
+ 
+ #define DART_PTR_ERR     BIT(63)
+ #define DART_IS_ERR(val) FIELD_GET(DART_PTR_ERR, val)
++#define DART_ERR_UNSUPPORTED_PT_REGION (-2)
+ 
+ typedef struct dart_dev dart_dev_t;
+ 
+diff --git a/src/dcp.c b/src/dcp.c
+index 777d691..5a482ff 100644
+--- a/src/dcp.c
++++ b/src/dcp.c
+@@ -189,7 +189,9 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+         goto out_free;
+     }
+     u64 vm_base = dart_vm_base(dcp->dart_dcp);
+-    dart_setup_pt_region(dcp->dart_dcp, cfg->dcp_dart, sid, vm_base);
++    if (dart_setup_pt_region(dcp->dart_dcp, cfg->dcp_dart, sid, vm_base) ==
++        DART_ERR_UNSUPPORTED_PT_REGION)
++        goto out_dart_dcp;
+ 
+     dcp->dart_disp = dart_init_adt(cfg->disp_dart, 0, 0, true);
+     if (!dcp->dart_disp) {
+@@ -197,7 +199,9 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
+         goto out_dart_dcp;
+     }
+     // set disp0's page tables at dart-dcp's vm-base
+-    dart_setup_pt_region(dcp->dart_disp, cfg->disp_dart, 0, vm_base);
++    if (dart_setup_pt_region(dcp->dart_disp, cfg->disp_dart, 0, vm_base) ==
++        DART_ERR_UNSUPPORTED_PT_REGION)
++        goto out_dart_disp;
+ 
+     dcp->iovad_dcp = iovad_init(vm_base + 0x10000000, vm_base + 0x20000000);
+ 
+@@ -248,6 +252,7 @@ out_rtkit:
+     rtkit_free(dcp->rtkit);
+ out_iovad:
+     iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
++out_dart_disp:
+     dart_shutdown(dcp->dart_disp);
+ out_dart_dcp:
+     dart_shutdown(dcp->dart_dcp);

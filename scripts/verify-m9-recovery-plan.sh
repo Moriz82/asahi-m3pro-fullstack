@@ -6,8 +6,10 @@ project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$project_root/scripts/lib/evidence.sh"
 M9_PROJECT_ROOT=$project_root
 source "$project_root/scripts/lib/m9-canonical.sh"
+m9_require_m1_anchor_args "$@"
+shift 4
 output_root=${SOFTWARE_OUTPUT_ROOT:-$project_root/out}
-usage() { printf 'usage: %s --plan ABS --release-inputs ABS --release-anchor ABS --anchor ABS\n' "$0" >&2; exit 64; }
+usage() { printf 'usage: %s --expected-target-identity-sha256 HEX --target-readiness-anchors ABS --plan ABS --release-inputs ABS --release-anchor ABS --anchor ABS\n' "$0" >&2; exit 64; }
 [[ $# -eq 8 && $1 == --plan && $3 == --release-inputs && $5 == --release-anchor && $7 == --anchor ]] || usage
 plan=$2; release=$4; release_anchor=$6; anchor=$8
 evidence_abs_dir "$plan"; evidence_abs_dir "$release"; evidence_abs_regular "$release_anchor"; evidence_abs_regular "$anchor"
@@ -17,7 +19,7 @@ evidence_readonly "$anchor"; evidence_readonly "$release_anchor"
 [[ $(evidence_kv "$anchor" anchor_trust) == untrusted-declarative ]] || evidence_die 'recovery anchor is not a configured signed authority'
 [[ $(evidence_kv "$anchor" plan_sha256) == "$(evidence_sha256 "$plan/plan.txt")" ]] || evidence_die 'recovery plan anchor mismatch'
 [[ $(evidence_kv "$anchor" release_anchor_sha256) == "$(evidence_sha256 "$release_anchor")" ]] || evidence_die 'release anchor pin mismatch'
-m9_validate_canonical_release_binding "$release" "$release_anchor"
+m9_validate_canonical_release_binding "$release" "$release_anchor" "$M9_EXPECTED_TARGET" "$M9_TARGET_ANCHORS"
 for file in plan.txt policy.txt SHA256SUMS; do evidence_abs_regular "$plan/$file"; done
 while IFS= read -r -d '' link; do evidence_die "symlink member: $link"; done < <(find -P "$plan" -type l -print0)
 while IFS= read -r -d '' member; do evidence_die "extra recovery-plan member: ${member#"$plan"/}"; done < <(find -P "$plan" -type f ! -name plan.txt ! -name policy.txt ! -name SHA256SUMS -print0)
