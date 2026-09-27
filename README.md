@@ -9,15 +9,16 @@ their own.
 
 > [!IMPORTANT]
 > **Current project status:** experimental bring-up, not daily-driver support.
-> A prior R13n2 loader reached Linux, while the later R13n3 diagnostic loader
-> regressed before the Arch userspace and was rolled back byte-for-byte to
-> R13n2. The rollback has not yet been confirmed by another native boot. GPU
-> startup remains blocked by the observed firmware-write translation denial
-> (`PAR=0x81f`); accelerated graphics, display lifecycle, cooling control, and
-> complete hardware acceptance remain open. Passing builds and offline tests
-> are not proof of native hardware support. Machine-local credentials, network
-> identities, firmware, vendor tools, source checkouts, and generated evidence
-> are intentionally excluded from this repository.
+> The native test installation was retired on 2026-09-26 to reclaim macOS
+> storage, after preserving and remotely verifying its newer source and
+> research. Recovered September 19 records extend through R16 and report
+> firmware initialization and one control-queue retirement, not accelerated
+> rendering. The earlier R13 loader failures remain historical evidence.
+> Accelerated graphics, display lifecycle, cooling control, and complete
+> hardware acceptance remain open. Passing builds and offline tests are not
+> proof of native hardware support. See the [preservation record](docs/native-retirement-2026-09-26.md)
+> for archive locations and scope. Credentials, network identities, firmware,
+> vendor tools and private generated evidence remain outside this public tree.
 
 The reproducible baseline builds pinned `m1n1`, U-Boot, and Linux fork commits
 inside Docker named volumes. Docker Desktop stores those volumes on a
