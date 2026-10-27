@@ -1,0 +1,34 @@
+# format=1
+# target=Apple M3 Pro / T6030 / Mac15,6 (J514s, 14") and Mac15,7 (J516s, 16")
+# source=macOS IORegistry on a live M3 Pro host (read-only), captured 2026-10-22
+# host_model=Mac15,7
+# scope=Real silicon identity only. These are the device-derivable GPU identity
+#   values. They are NOT a reverse-engineered firmware ABI and NOT a hardware
+#   acceptance claim. Fields marked re-gated below are extracted from Apple GPU
+#   firmware/driver tracing (not available in this environment) and MUST NOT be
+#   invented. hardware_acceptance=false.
+#
+# key	value	provenance	status
+ioclass	AGXAcceleratorG15X	IORegistry AGXAccelerator IOClass	device-derived
+gpu_gen	15	GPUConfigurationVariable.gpu_gen	device-derived
+gpu_variant	S	GPUConfigurationVariable.gpu_var	device-derived
+usc_gen	3	GPUConfigurationVariable.usc_gen	device-derived
+num_cores_physical	20	GPUConfigurationVariable.num_cores	device-derived
+num_frags_physical	20	GPUConfigurationVariable.num_frags	device-derived
+num_gps	8	GPUConfigurationVariable.num_gps	device-derived
+num_mgpus	2	GPUConfigurationVariable.num_mgpus	device-derived
+core_mask_list	0x1ff,0x1ff	GPUConfigurationVariable.core_mask_list	device-derived
+gpu_core_count_active	18	IORegistry gpu-core-count (2 cores fused off)	device-derived
+firmware_bundle	G15 RTBuddy	AGXFirmwareKextG15RTBuddy	device-derived
+chip_id	0x6030	SoC identity (T6030)	device-derived
+# --- reverse-engineering-gated: required by the driver HwConfig / DT, not	 --- #
+# --- derivable from IORegistry, not present in this environment, do not invent --- #
+apple_firmware_version	UNKNOWN	macOS AGX firmware bundle version triple	re-gated
+apple_firmware_abi	UNKNOWN	driver/firmware ABI triple	re-gated
+gpu_opp_dvfs_table	UNKNOWN	per-pstate freq/microvolt points	re-gated
+hwconfig_unk_coef_a	UNKNOWN	HwConfig.unk_coef_a per-cluster coefficients	re-gated
+hwconfig_unk_coef_b	UNKNOWN	HwConfig.unk_coef_b per-cluster coefficients	re-gated
+hwconfig_da_db	UNKNOWN	HwConfigA / HwConfigB register field values	re-gated
+hwdata_shared_tables	UNKNOWN	HwDataShared1/2/3 tables	re-gated
+preempt_buffer_sizes	UNKNOWN	preemption buffer size constants	re-gated
+temp_sensor_mask	UNKNOWN	per-cluster temperature sensor map	re-gated

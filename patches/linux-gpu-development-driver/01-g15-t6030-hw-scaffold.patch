@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vincent Knight <gallantcrusader@proton.me>
+Date: Thu, 22 Oct 2026 21:40:00 +0000
+Subject: [DEVELOPMENT PATCH 1/3] drm/asahi: hw: add RE-gated G15 and T6030
+ scaffolding
+
+Development only. This is scaffolding for a future M3 Pro (T6030)
+bring-up, not GPU support. Everything here is under
+CONFIG_DRM_ASAHI_G15_CANDIDATE, which the last patch of this series
+adds; until then the code is compiled out.
+
+Add GpuGen::G15 = 15, the gpu_gen that macOS GPUConfigurationVariable
+reports on T6030. T6030 reports variant S, which GpuVariant already
+has, so no new variant is needed. Add GpuCore::G15S for the G15X/G15S
+class. Its firmware core type ID is unknown, so the discriminant is a
+named RE-gated zero placeholder rather than an extrapolation of the
+G13/G14 numbering.
+
+Add hw/t603x.rs with HWCONFIG_T6030. Only the identity comes from the
+device-derived silicon profile (macOS IORegistry on a Mac15,7): chip_id
+0x6030, G15, variant S, two clusters (num_mgpus), and per cluster 10
+cores, 10 frags and 4 GPs from 20/20/8 across the clusters.
+Compile-time asserts tie those counts to the 0x1ff,0x1ff core masks and
+18 active cores. num_dies = 1 is inferred instead: the pinned
+t6030.dtsi has no die1 nodes, and the silicon profile has no die count.
+
+Every other field is gated on reverse engineering: base clock, UAT OAS,
+preemption buffer sizes, clustering metadata, tiling control,
+HwConfigA/HwConfigB, HwDataShared1/2/3, firmware globals, sram_k,
+unk_coef_a/b, the globals table, CS/AFR presence, temperature sensor
+masks, firmware MMIO mappings and the SRAM window. Each is a named
+RE_GATED_* constant holding zero or an empty table, labelled TODO(re),
+so no nonzero value can pass for a tuned one. CS/AFR presence is a
+bool, so it is a named fail-closed placeholder instead. No t600x, t602x
+or t8112 value is copied.
+
+No native validation. hardware_acceptance=false.
+
+Assisted-by: Claude:claude-opus-5-5
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/hw/mod.rs   |  12 ++
+ drivers/gpu/drm/asahi/hw/t603x.rs | 200 ++++++++++++++++++++++++++++++
+ 2 files changed, 212 insertions(+)
+ create mode 100644 drivers/gpu/drm/asahi/hw/t603x.rs
+
+diff --git a/drivers/gpu/drm/asahi/hw/mod.rs b/drivers/gpu/drm/asahi/hw/mod.rs
+index 611764b..4d6c304 100644
+--- a/drivers/gpu/drm/asahi/hw/mod.rs
++++ b/drivers/gpu/drm/asahi/hw/mod.rs
+@@ -13,6 +13,8 @@ const MAX_POWERZONES: usize = 5;
+ 
+ pub(crate) mod t600x;
+ pub(crate) mod t602x;
++#[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++pub(crate) mod t603x;
+ pub(crate) mod t8103;
+ pub(crate) mod t8112;
+ 
+@@ -22,6 +24,10 @@ pub(crate) mod t8112;
+ pub(crate) enum GpuGen {
+     G13 = 13,
+     G14 = 14,
++    // M3 family. 15 is macOS GPUConfigurationVariable.gpu_gen on T6030.
++    // RE-gated candidate only: no G15 firmware ABI is supported.
++    #[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++    G15 = 15,
+ }
+ 
+ /// GPU variant enumeration. Note: Part of the UABI.
+@@ -70,6 +76,12 @@ pub(crate) enum GpuCore {
+     G14S = 16,
+     G14C = 17,
+     G14D = 18, // Split out, unlike G13D
++    // TODO(re): the firmware's G15S core type ID must be extracted from a
++    // macOS AGX firmware trace on T6030. The discriminant is an RE-gated
++    // zero placeholder, NOT a working value; it is never sent to the
++    // firmware because probe refuses every G15 device.
++    #[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++    G15S = t603x::GPU_CORE_G15S_RE_GATED,
+ }
+ 
+ /// GPU revision ID. Note: Part of the firmware ABI.
+diff --git a/drivers/gpu/drm/asahi/hw/t603x.rs b/drivers/gpu/drm/asahi/hw/t603x.rs
+new file mode 100644
+index 0000000..546ecc0
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/hw/t603x.rs
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++
++//! RE-gated hardware configuration scaffolding for t603x (M3 Pro) platforms.
++//!
++//! THIS IS NOT A WORKING CONFIGURATION.
++//!
++//! Only the GPU identity is device-derived. It was read from the macOS
++//! IORegistry (`AGXAcceleratorG15X`, `GPUConfigurationVariable`) on a live
++//! Mac15,7 (T6030) and recorded in the bring-up silicon profile
++//! (`config/milestone4-gpu-silicon-profile.tsv`): gpu_gen 15, variant S,
++//! usc_gen 3, 2 mGPUs, 20 physical cores and frags, 8 GPs, core masks
++//! 0x1ff/0x1ff (18 active cores) and G15 RTBuddy firmware.
++//!
++//! Every firmware-facing value has to be extracted from a macOS AGX
++//! firmware/driver trace on T6030, which has not been done. Each such field
++//! is a named `RE_GATED_*` zero or empty placeholder marked `TODO(re)`. No M1
++//! (t600x) or M2 (t602x, t8112) value is reused.
++//!
++//! The rest of the driver is not G15-aware either. Still RE-gated, and not
++//! represented here:
++//!
++//! - the G15 firmware ABI: there is no G15 `GpuManager` or versioned firmware
++//!   structure, and no `apple,firmware-compat` value selects one;
++//! - SGX ID register decoding in `regs.rs` (generation and variant encoding,
++//!   core mask and fault register layout); unknown generations are rejected;
++//! - device-tree values: `apple,firmware-version`, `apple,firmware-abi`, the
++//!   DVFS operating points, leakage coefficients and power-controller tunables.
++//!
++//! `driver.rs` therefore refuses to probe any G15 device before it touches
++//! DMA, MMIO or the GPU coprocessor, so these placeholders never reach the
++//! firmware or the hardware.
++
++use crate::f32;
++
++use super::*;
++
++// Device-derived T6030 GPU identity (macOS IORegistry on a Mac15,7).
++//
++// The 18 active cores in two 9-bit masks show that `num_cores` counts every
++// cluster. `num_frags` and `num_gps` are assumed to do the same.
++// TODO(hw): confirm the per-cluster counts against ID_COUNTS_1/ID_COUNTS_2.
++
++/// `GPUConfigurationVariable.num_mgpus`: number of GPU clusters.
++const T6030_NUM_MGPUS: u32 = 2;
++/// `GPUConfigurationVariable.num_cores`: physical cores in all clusters.
++const T6030_NUM_CORES_PHYSICAL: u32 = 20;
++/// `GPUConfigurationVariable.num_frags`: physical frags in all clusters.
++const T6030_NUM_FRAGS_PHYSICAL: u32 = 20;
++/// `GPUConfigurationVariable.num_gps`: GPs in all clusters.
++const T6030_NUM_GPS: u32 = 8;
++/// IORegistry `gpu-core-count`: active cores (two are fused off).
++const T6030_NUM_CORES_ACTIVE: u32 = 18;
++/// `GPUConfigurationVariable.core_mask_list`: active cores per cluster.
++const T6030_CORE_MASKS: [u32; 2] = [0x1ff, 0x1ff];
++
++// Keep the device-derived identity self-consistent.
++const _: () = assert!(T6030_CORE_MASKS.len() == T6030_NUM_MGPUS as usize);
++const _: () = assert!(T6030_NUM_CORES_PHYSICAL % T6030_NUM_MGPUS == 0);
++const _: () = assert!(T6030_NUM_FRAGS_PHYSICAL % T6030_NUM_MGPUS == 0);
++const _: () = assert!(T6030_NUM_GPS % T6030_NUM_MGPUS == 0);
++const _: () = assert!(
++    T6030_CORE_MASKS[0].count_ones() + T6030_CORE_MASKS[1].count_ones() == T6030_NUM_CORES_ACTIVE
++);
++const _: () = assert!(T6030_CORE_MASKS[0] >> (T6030_NUM_CORES_PHYSICAL / T6030_NUM_MGPUS) == 0);
++const _: () = assert!(T6030_CORE_MASKS[1] >> (T6030_NUM_CORES_PHYSICAL / T6030_NUM_MGPUS) == 0);
++
++// RE-gated placeholders.
++//
++// Every RE_GATED_* constant stands in for a value that must be extracted from
++// a macOS AGX firmware/driver trace on T6030. Each holds zero or an empty
++// table and is named, so every use is visibly incomplete and a nonzero value
++// can never pass for a tuned one. NOT working values.
++
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_U16: u16 = 0;
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_U32: u32 = 0;
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_I32: i32 = 0;
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_U64: u64 = 0;
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_USIZE: usize = 0;
++/// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++const RE_GATED_F32: F32 = f32!(0.0);
++/// TODO(re): table not extracted from a T6030 firmware trace; NOT a working value.
++const RE_GATED_I16_TABLE: &[i16] = &[];
++/// TODO(re): table not extracted from a T6030 firmware trace; NOT a working value.
++const RE_GATED_I32_TABLE: &[i32] = &[];
++/// TODO(re): table not extracted from a T6030 firmware trace; NOT a working value.
++const RE_GATED_U32_TABLE: &[u32] = &[];
++/// TODO(re): table not extracted from a T6030 firmware trace; NOT a working value.
++const RE_GATED_U8_TABLE: &[u8] = &[];
++/// TODO(re): per-cluster coefficients not extracted; NOT a working value.
++const RE_GATED_COEFS: &[&[F32]] = &[];
++/// TODO(re): firmware MMIO mapping list not extracted; NOT a working value.
++const RE_GATED_IO_MAPPINGS: &[Option<IOMapping>] = &[];
++
++/// TODO(re): whether T6030 has CS/AFR performance states is unknown.
++///
++/// `true` is NOT a determination. It fails closed, because the power
++/// configuration then also requires `apple,cs-opp` and `apple,afr-opp`.
++const HAS_CSAFR_RE_GATED: bool = true;
++
++/// Placeholder for the firmware's G15S core type ID ([`GpuCore::G15S`]).
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value.
++pub(super) const GPU_CORE_G15S_RE_GATED: u32 = RE_GATED_U32;
++
++/// T6030 (M3 Pro) GPU configuration scaffolding. NOT a working configuration.
++pub(crate) const HWCONFIG_T6030: super::HwConfig = HwConfig {
++    // Device-derived identity.
++    chip_id: 0x6030,
++    gpu_gen: GpuGen::G15,
++    gpu_variant: GpuVariant::S,
++    // TODO(re): the name is derived; the firmware ID behind it is not.
++    gpu_core: GpuCore::G15S,
++
++    // TODO(re): not in the device-derived profile; confirm on T6030.
++    base_clock_hz: RE_GATED_U32,
++    // TODO(re): UAT output address size; confirm on T6030.
++    uat_oas: RE_GATED_U32,
++    // Inferred: single-die SoC (pinned t6030.dtsi has no die1 nodes); not in the silicon profile.
++    num_dies: 1,
++    max_num_clusters: T6030_NUM_MGPUS,
++    max_num_cores: T6030_NUM_CORES_PHYSICAL / T6030_NUM_MGPUS,
++    max_num_frags: T6030_NUM_FRAGS_PHYSICAL / T6030_NUM_MGPUS,
++    max_num_gps: T6030_NUM_GPS / T6030_NUM_MGPUS,
++
++    // TODO(re): preemption buffer sizes.
++    preempt1_size: RE_GATED_USIZE,
++    preempt2_size: RE_GATED_USIZE,
++    preempt3_size: RE_GATED_USIZE,
++    compute_preempt1_size: RE_GATED_USIZE,
++    // TODO(re): whether G15 uses this clustering metadata at all, and its sizes.
++    clustering: Some(HwClusteringConfig {
++        meta1_blocksize: RE_GATED_USIZE,
++        meta2_size: RE_GATED_USIZE,
++        meta3_size: RE_GATED_USIZE,
++        meta4_size: RE_GATED_USIZE,
++        max_splits: RE_GATED_USIZE,
++    }),
++
++    render: HwRenderConfig {
++        // TODO(re): tiling control register value.
++        tiling_control: RE_GATED_U32,
++    },
++
++    // TODO(re): HwConfigA/HwConfigB field values.
++    da: HwConfigA {
++        unk_87c: RE_GATED_I32,
++        unk_8cc: RE_GATED_U32,
++        unk_e24: RE_GATED_U32,
++    },
++    db: HwConfigB {
++        unk_454: RE_GATED_U32,
++        unk_4e0: RE_GATED_U64,
++        unk_534: RE_GATED_U32,
++        unk_ab8: RE_GATED_U32,
++        unk_abc: RE_GATED_U32,
++        unk_b30: RE_GATED_U32,
++    },
++    // TODO(re): HwDataShared1/2/3 tables and scalars.
++    shared1_tab: RE_GATED_I32_TABLE,
++    shared1_a4: RE_GATED_U32,
++    shared2_tab: RE_GATED_I32_TABLE,
++    shared2_unk_508: RE_GATED_U32,
++    shared2_curves: Some(HwConfigShared2Curves {
++        t1_coef: RE_GATED_U32,
++        t2: RE_GATED_I16_TABLE,
++        t3_coefs: RE_GATED_U32_TABLE,
++        t3_scales: RE_GATED_U32_TABLE,
++    }),
++    shared3_unk: RE_GATED_U32,
++    shared3_tab: RE_GATED_U32_TABLE,
++
++    // TODO(re): firmware globals.
++    idle_off_standby_timer_default: RE_GATED_U32,
++    unk_hws2_4: Some([RE_GATED_F32; 8]),
++    unk_hws2_24: RE_GATED_U32,
++    global_unk_54: RE_GATED_U16,
++
++    // TODO(re): SRAM voltage constant and per-cluster coefficients.
++    sram_k: RE_GATED_F32,
++    unk_coef_a: RE_GATED_COEFS,
++    unk_coef_b: RE_GATED_COEFS,
++    // TODO(re): Globals table.
++    global_tab: Some(RE_GATED_U8_TABLE),
++    // TODO(re): CS/AFR presence; see HAS_CSAFR_RE_GATED.
++    has_csafr: HAS_CSAFR_RE_GATED,
++
++    // TODO(re): temperature sensor masks.
++    fast_sensor_mask: [RE_GATED_U64; 2],
++    fast_sensor_mask_alt: [RE_GATED_U64; 2],
++    fast_die0_sensor_present: RE_GATED_U32,
++    // TODO(re): firmware MMIO mappings (bases, sizes and slot order).
++    io_mappings: RE_GATED_IO_MAPPINGS,
++    // TODO(re): GPU SRAM window.
++    sram_base: Some(RE_GATED_USIZE),
++    sram_size: Some(RE_GATED_USIZE),
++};
+-- 
+2.54.0 (Apple Git-157)
+

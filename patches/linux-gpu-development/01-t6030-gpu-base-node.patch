@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: M3 Pro Linux downstream <m3pro-linux@localhost>
+Date: Thu, 22 Oct 2026 12:00:00 -0500
+Subject: [DEVELOPMENT PATCH 1/3] arm64: dts: apple: t6030: add disabled AGX
+ G15 GPU node candidate
+
+Development only. Add t6030-gpu.dtsi with a base gpu node, AGX mailbox,
+GPU DVFS table and the six GPU reserved-memory placeholders, modelled on
+t600x-die0.dtsi, t602x-die0.dtsi and t8112.dtsi. Nothing includes the
+file yet, so no DTB changes.
+
+The base compatible "apple,agx-g15s" comes from device-derived T6030
+identity only (gpu_gen 15, variant S). The two-cell per-cluster voltage
+width is inferred from core_mask_list (two entries), matching the
+t6020/t6000 GPU_REPEAT precedent. power-domains uses the existing ps_gfx
+domain in t6030-pmgr.dtsi.
+
+Every other value is a named, gated zero or poison sentinel:
+- ADT_GATED_*, TODO(adt): the asc, sgx and mailbox windows and the
+  mailbox IRQs must be translated from the target ADT. They are not in
+  this tree. The mailbox reg base is the poison word 0xdeadbeef with
+  size zero, only so that mbox@deadbeef does not share gpu@0's unit
+  address. It is not an address.
+- RE_GATED_*, TODO(re): apple,firmware-abi, -version and -compat and
+  the DVFS table must come from a reviewed macOS AGX firmware trace on
+  T6030.
+
+Driver power/thermal tuning properties are deliberately absent rather
+than copied from M1/M2. Both device nodes and all GPU reserved-memory
+nodes are disabled, and no driver or loader in this tree matches or
+fills them. No hardware acceptance is implied.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/apple/t6030-gpu.dtsi | 170 +++++++++++++++++++++++
+ 1 file changed, 170 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/apple/t6030-gpu.dtsi
+
+diff --git a/arch/arm64/boot/dts/apple/t6030-gpu.dtsi b/arch/arm64/boot/dts/apple/t6030-gpu.dtsi
+new file mode 100644
+index 0000000..b22618a
+--- /dev/null
++++ b/arch/arm64/boot/dts/apple/t6030-gpu.dtsi
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-2.0+ OR MIT
++/*
++ * Development-only AGX (G15) GPU topology candidate for the Apple T6030
++ * "M3 Pro", modelled on the gpu/agx_mbox nodes of t600x-die0.dtsi,
++ * t602x-die0.dtsi and t8112.dtsi.
++ *
++ * This is NOT a working configuration and it is not hardware-accepted:
++ *  - no driver in this tree matches any compatible string used here;
++ *  - no loader in this tree fills this node for T6030;
++ *  - every MMIO, IRQ, firmware and DVFS value below is a gated placeholder;
++ *  - both device nodes and all GPU reserved-memory nodes stay disabled.
++ *
++ * Only device-derived identity is encoded: GPU generation 15 and variant S
++ * select the base compatible string. The per-cluster cell count is inferred
++ * from core_mask_list (two entries, 0x1ff,0x1ff), matching the t6020/t6000
++ * GPU_REPEAT precedent. The SoC-specific compatible is added by t6030.dtsi.
++ */
++
++/*
++ * ADT-gated resources. The GPU coprocessor ("asc"), GPU block ("sgx") and
++ * AGX mailbox windows and the mailbox IRQs must be translated from the
++ * target Apple Device Tree (/arm-io/gfx-asc and /arm-io/sgx). They are not in
++ * this tree, and the GFX PMGR at 0x290e80000 does not determine them. The
++ * zero and poison sentinels keep both nodes unprobeable. They are not
++ * addresses.
++ */
++// TODO(adt): extract /arm-io/gfx-asc reg from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_ASC_REG		0x0 0x0 0x0 0x0
++// TODO(adt): extract /arm-io/sgx reg from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_SGX_REG		0x0 0x0 0x0 0x0
++/*
++ * The mailbox sentinel base is the poison word 0xdeadbeef rather than zero
++ * only so that agx_mbox gets a unit address (mbox@deadbeef) distinct from
++ * gpu@0: a shared @0 is a dtc unique_unit_address warning, and any unit
++ * address other than the reg base is a simple_bus_reg warning. The size is
++ * zero. It is not an address and must not be read as a mailbox base.
++ */
++// TODO(adt): extract the gfx-asc mailbox window from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_MBOX_REG		0x0 0xdeadbeef 0x0 0x0
++// TODO(adt): extract gfx-asc mailbox AIC IRQs from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_IRQ_SEND_EMPTY	0
++// TODO(adt): extract gfx-asc mailbox AIC IRQs from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_IRQ_SEND_NOT_EMPTY	0
++// TODO(adt): extract gfx-asc mailbox AIC IRQs from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_IRQ_RECV_EMPTY	0
++// TODO(adt): extract gfx-asc mailbox AIC IRQs from the T6030 ADT; NOT a working value
++#define ADT_GATED_T6030_AGX_IRQ_RECV_NOT_EMPTY	0
++
++/*
++ * RE-gated firmware and DVFS values. These come from tracing Apple's GPU
++ * firmware and macOS AGX driver on T6030, which is not available here. The
++ * all-zero triples follow the existing "loader fills this" convention; no
++ * loader in this tree does so for T6030. Do not replace them with M1/M2
++ * values.
++ */
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_FIRMWARE_ABI		0 0 0
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_FIRMWARE_VERSION	0 0 0
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_FIRMWARE_COMPAT	0 0 0
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_OPP_HZ		0
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_OPP_MICROVOLT	0
++// TODO(re): extract from macOS AGX firmware trace on T6030; NOT a working value
++#define RE_GATED_T6030_AGX_OPP_MICROWATT	0
++
++/ {
++	/*
++	 * TODO(re): T6030 GPU DVFS table. The performance-state count and each
++	 * state's frequency, per-cluster voltage and power must come from the
++	 * target ADT (/arm-io/sgx perf-states, perf-states-sram,
++	 * perf-state-count) and a reviewed macOS AGX trace showing how G15
++	 * firmware consumes them. No M1/M2 table applies. The single all-zero
++	 * entry is a fail-closed sentinel, not an operating point.
++	 *
++	 * opp-microvolt has two cells, inferred from core_mask_list (two
++	 * entries), matching the t6020/t6000 GPU_REPEAT precedent. Whether G15
++	 * firmware consumes one voltage per cluster, as the G13/G14 driver
++	 * model does, is RE-gated.
++	 */
++	gpu_opp: opp-table-gpu {
++		compatible = "operating-points-v2";
++
++		opp00 {
++			opp-hz = /bits/ 64 <RE_GATED_T6030_AGX_OPP_HZ>;
++			opp-microvolt = <RE_GATED_T6030_AGX_OPP_MICROVOLT
++					 RE_GATED_T6030_AGX_OPP_MICROVOLT>;
++			opp-microwatt = <RE_GATED_T6030_AGX_OPP_MICROWATT>;
++		};
++	};
++
++	reserved-memory {
++		/*
++		 * Placeholders a loader must size, place and enable from the
++		 * target ADT and its firmware init-data builder. Disabled, so
++		 * nothing is reserved until then.
++		 */
++		gpu_globals: globals {
++			status = "disabled";
++		};
++
++		gpu_hw_cal_a: hw-cal-a {
++			status = "disabled";
++		};
++
++		gpu_hw_cal_b: hw-cal-b {
++			status = "disabled";
++		};
++
++		uat_handoff: uat-handoff {
++			status = "disabled";
++		};
++
++		uat_pagetables: uat-pagetables {
++			status = "disabled";
++		};
++
++		uat_ttbs: uat-ttbs {
++			status = "disabled";
++		};
++	};
++};
++
++&soc {
++	/*
++	 * Power/thermal tuning consumed by the asahi driver (apple,perf-*,
++	 * apple,ppm-*, apple,pwr-*, apple,avg-power-*, apple,fast-die0-*,
++	 * apple,min-sram-microvolt, apple,power-sample-period,
++	 * apple,core-leak-coef, apple,sram-leak-coef and any CS/AFR tables) is
++	 * deliberately absent. Those are target ADT/RE values and must not be
++	 * copied from M1/M2 nodes.
++	 */
++	gpu: gpu@0 {
++		compatible = "apple,agx-g15s";
++		reg = <ADT_GATED_T6030_AGX_ASC_REG>,
++			<ADT_GATED_T6030_AGX_SGX_REG>;
++		reg-names = "asc", "sgx";
++		mboxes = <&agx_mbox>;
++		power-domains = <&ps_gfx>;
++		memory-region = <&uat_ttbs>, <&uat_pagetables>, <&uat_handoff>,
++				<&gpu_hw_cal_a>, <&gpu_hw_cal_b>, <&gpu_globals>;
++		memory-region-names = "ttbs", "pagetables", "handoff",
++				      "hw-cal-a", "hw-cal-b", "globals";
++
++		apple,firmware-abi = <RE_GATED_T6030_AGX_FIRMWARE_ABI>;
++		apple,firmware-version = <RE_GATED_T6030_AGX_FIRMWARE_VERSION>;
++		apple,firmware-compat = <RE_GATED_T6030_AGX_FIRMWARE_COMPAT>;
++
++		operating-points-v2 = <&gpu_opp>;
++
++		status = "disabled";
++	};
++
++	/* TODO(adt): unit address follows the poison sentinel reg; NOT a working value */
++	agx_mbox: mbox@deadbeef {
++		compatible = "apple,t6030-asc-mailbox", "apple,asc-mailbox-v4";
++		reg = <ADT_GATED_T6030_AGX_MBOX_REG>;
++		interrupt-parent = <&aic>;
++		interrupts = <AIC_IRQ ADT_GATED_T6030_AGX_IRQ_SEND_EMPTY IRQ_TYPE_LEVEL_HIGH>,
++			<AIC_IRQ ADT_GATED_T6030_AGX_IRQ_SEND_NOT_EMPTY IRQ_TYPE_LEVEL_HIGH>,
++			<AIC_IRQ ADT_GATED_T6030_AGX_IRQ_RECV_EMPTY IRQ_TYPE_LEVEL_HIGH>,
++			<AIC_IRQ ADT_GATED_T6030_AGX_IRQ_RECV_NOT_EMPTY IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "send-empty", "send-not-empty",
++			"recv-empty", "recv-not-empty";
++		#mbox-cells = <0>;
++		status = "disabled";
++	};
++};

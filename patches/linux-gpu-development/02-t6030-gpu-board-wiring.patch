@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: M3 Pro Linux downstream <m3pro-linux@localhost>
+Date: Thu, 22 Oct 2026 12:01:00 -0500
+Subject: [DEVELOPMENT PATCH 2/3] arm64: dts: apple: t6030: include GPU
+ candidate for J514s and J516s
+
+Development only. Include t6030-gpu.dtsi from t6030.dtsi, after
+t6030-pmgr.dtsi defines ps_gfx. The GPU is SoC-level hardware, so both
+M3 Pro boards get the same disabled nodes through their existing
+t6030.dtsi include: t6030-j514s.dts (14-inch) and t6030-j516s.dts
+(16-inch). Neither board file changes.
+
+Each board DTB gains only the disabled gpu@0 and mbox@0 nodes, the
+gpu_opp sentinel table and six disabled reserved-memory children. No
+existing node or property changes, and no new DTC warning appears at
+the default or W=1 level.
+
+The node still carries only the generic "apple,agx-g15s" compatible.
+The gpu alias that a loader uses to fill the node is deliberately not
+added.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/apple/t6030.dtsi | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t6030.dtsi b/arch/arm64/boot/dts/apple/t6030.dtsi
+index efa9e57..529bf0f 100644
+--- a/arch/arm64/boot/dts/apple/t6030.dtsi
++++ b/arch/arm64/boot/dts/apple/t6030.dtsi
+@@ -1534,3 +1534,4 @@
+ };
+ 
+ #include "t6030-pmgr.dtsi"
++#include "t6030-gpu.dtsi"

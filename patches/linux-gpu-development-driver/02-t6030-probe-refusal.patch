@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vincent Knight <gallantcrusader@proton.me>
+Date: Thu, 22 Oct 2026 21:41:00 +0000
+Subject: [DEVELOPMENT PATCH 2/3] drm/asahi: driver: match apple,agx-t6030 and
+ refuse to probe it
+
+Development only. Everything here is under
+CONFIG_DRM_ASAHI_G15_CANDIDATE, which the next patch adds; until then
+the code is compiled out.
+
+Add "apple,agx-t6030" to the OF table, mapped to the RE-gated
+HWCONFIG_T6030, so a future T6030 GPU node binds to asahi. hw/mod.rs
+re-exports it as hw::HWCONFIG_T6030 under the same gate, so the entry
+names it next to the other SoC configurations. Probe then
+fails with -ENODEV for every G15 configuration. It fails before setting
+the DMA mask, mapping MMIO or starting the GPU coprocessor, so none of
+the placeholders are used.
+
+"apple,agx-g15x" is deliberately not matched. The table binds only
+SoC-specific compatibles; there is no "apple,agx-g14x" entry either. A
+family fallback would bind the T6030 configuration to other G15X SoCs.
+The firmware-ABI dispatch gains no G15 arm, because no G15 GpuManager
+exists.
+
+A local macro wraps the OF table, with one definition per gate state.
+The existing entries are unchanged and only the candidate entry
+differs.
+
+No device tree node is added. No native validation.
+hardware_acceptance=false.
+
+Assisted-by: Claude:claude-opus-5-5
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/driver.rs | 44 ++++++++++++++++++++++++++++++++-
+ drivers/gpu/drm/asahi/hw/mod.rs |  4 +++
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/asahi/driver.rs b/drivers/gpu/drm/asahi/driver.rs
+index bafcfc4..7bd4ada 100644
+--- a/drivers/gpu/drm/asahi/driver.rs
++++ b/drivers/gpu/drm/asahi/driver.rs
+@@ -107,8 +107,37 @@ impl drm::driver::Driver for AsahiDriver {
+     }
+ }
+ 
++/// `kernel::of_device_table!` for the supported SoCs.
++#[cfg(not(CONFIG_DRM_ASAHI_G15_CANDIDATE))]
++macro_rules! asahi_of_device_table {
++    ($table:ident, $module_table:ident, $info:ty, [$($entry:expr),* $(,)?]) => {
++        kernel::of_device_table!($table, $module_table, $info, [$($entry),*]);
++    };
++}
++
++/// `kernel::of_device_table!` for the supported SoCs, plus the RE-gated
++/// T6030 candidate. `probe()` refuses every G15 device; see `hw::t603x`.
++#[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++macro_rules! asahi_of_device_table {
++    ($table:ident, $module_table:ident, $info:ty, [$($entry:expr),* $(,)?]) => {
++        kernel::of_device_table!(
++            $table,
++            $module_table,
++            $info,
++            [
++                $($entry,)*
++                // TODO(re): binds only so that probe() can refuse it.
++                (
++                    of::DeviceId::new(c_str!("apple,agx-t6030")),
++                    &hw::HWCONFIG_T6030
++                ),
++            ]
++        );
++    };
++}
++
+ // OF Device ID table.s
+-kernel::of_device_table!(
++asahi_of_device_table!(
+     OF_TABLE,
+     MODULE_OF_TABLE,
+     <AsahiDriver as platform::Driver>::IdInfo,
+@@ -164,6 +193,19 @@ impl platform::Driver for AsahiDriver {
+ 
+         let cfg = info.ok_or(ENODEV)?;
+ 
++        // TODO(re): G15 has no firmware ABI, ID register decoding, HwConfig
++        // values or GpuManager yet (see hw::t603x). Refuse before the DMA
++        // mask, MMIO setup or coprocessor start can touch the hardware.
++        #[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++        if cfg.gpu_gen == hw::GpuGen::G15 {
++            dev_err!(
++                pdev.as_ref(),
++                "T{:x} (G15) support is non-functional RE-gated scaffolding, not probing\n",
++                cfg.chip_id
++            );
++            return Err(ENODEV);
++        }
++
+         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(cfg.uat_oas)?)? };
+ 
+         let res = regs::Resources::new(pdev)?;
+diff --git a/drivers/gpu/drm/asahi/hw/mod.rs b/drivers/gpu/drm/asahi/hw/mod.rs
+index 4d6c304..52bd295 100644
+--- a/drivers/gpu/drm/asahi/hw/mod.rs
++++ b/drivers/gpu/drm/asahi/hw/mod.rs
+@@ -18,6 +18,10 @@ pub(crate) mod t603x;
+ pub(crate) mod t8103;
+ pub(crate) mod t8112;
+ 
++// HwConfig for the RE-gated "apple,agx-t6030" OF table entry in driver.rs.
++#[cfg(CONFIG_DRM_ASAHI_G15_CANDIDATE)]
++pub(crate) use t603x::HWCONFIG_T6030;
++
+ /// GPU generation enumeration. Note: Part of the UABI.
+ #[derive(Debug, PartialEq, Copy, Clone)]
+ #[repr(u32)]
+-- 
+2.54.0 (Apple Git-157)
+

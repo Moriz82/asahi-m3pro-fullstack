@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vincent Knight <gallantcrusader@proton.me>
+Date: Thu, 22 Oct 2026 21:42:00 +0000
+Subject: [DEVELOPMENT PATCH 3/3] drm/asahi: Kconfig: add non-functional G15
+ candidate gate
+
+Development only. Add DRM_ASAHI_G15_CANDIDATE, default n and hidden
+behind EXPERT. It compiles the T6030/G15 scaffolding from the previous
+two patches. The option comes last so that it can only be enabled once
+both the scaffolding and its probe refusal are present. With it unset
+all new code is compiled out, and the driver matches and probes exactly
+as before.
+
+The scaffolding carries only the device-derived T6030 GPU identity.
+Every firmware-facing value is a reverse-engineering-gated zero
+placeholder, and probe refuses G15 before touching the hardware.
+
+No Makefile change is needed: hw/t603x.rs is a module of the single
+asahi.rs crate root, which obj-$(CONFIG_DRM_ASAHI) already builds.
+
+No native validation. Not selected by any canonical or development boot
+build. hardware_acceptance=false.
+
+Assisted-by: Claude:claude-opus-5-5
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/Kconfig | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/Kconfig b/drivers/gpu/drm/asahi/Kconfig
+index dfc8987..a26dab2 100644
+--- a/drivers/gpu/drm/asahi/Kconfig
++++ b/drivers/gpu/drm/asahi/Kconfig
+@@ -36,3 +36,20 @@ config DRM_ASAHI_DEBUG_ALLOCATOR
+ 
+ 	  Say N unless you are debugging firmware structures or porting to a
+ 	  new firmware version.
++
++config DRM_ASAHI_G15_CANDIDATE
++	bool "Non-functional Apple G15 (M3 Pro, T6030) scaffolding"
++	depends on DRM_ASAHI
++	depends on EXPERT
++	help
++	  Build reverse-engineering-gated scaffolding for the Apple G15 GPU
++	  in the T6030 (M3 Pro) SoC: G15 identity enums, a T6030 hardware
++	  configuration whose firmware-facing values are all RE-gated zero
++	  placeholders, and an "apple,agx-t6030" match whose probe always
++	  fails with -ENODEV before touching the hardware.
++
++	  This does NOT add working M3 Pro GPU support. No G15 firmware ABI,
++	  ID register decoding, power tables or GPU manager exist yet, and
++	  nothing here has been validated on hardware.
++
++	  Say N unless you are extracting G15 firmware values.
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: M3 Pro Linux downstream <m3pro-linux@localhost>
+Date: Thu, 22 Oct 2026 12:02:00 -0500
+Subject: [DEVELOPMENT PATCH 3/3] arm64: dts: apple: t6030: add T6030 AGX
+ compatible override
+
+Development only. Override the generic base compatible with the
+SoC-specific list, as t6020.dtsi does for the M2 Pro:
+
+  "apple,agx-t6030", "apple,agx-g15x", "apple,agx-g15s"
+
+Each string follows from device-derived identity: chip ID 0x6030,
+IOClass AGXAcceleratorG15X, and GPU generation 15 with variant S. The
+middle string assumes that the existing "apple,agx-g14x" string names
+the AGXAcceleratorG14X family. Nothing in this tree states that, and
+t6000.dtsi uses "apple,agx-g13x" without a variant string. Upstream
+naming for G15, when it exists, takes precedence.
+
+No driver in this tree matches "apple,agx-t6030", and the pinned
+apple,agx.yaml binding enumerates no G15 string. Nothing binds, and no
+dt-schema pass is claimed. The node stays disabled on both J514s and
+J516s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/apple/t6030.dtsi | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t6030.dtsi b/arch/arm64/boot/dts/apple/t6030.dtsi
+index 529bf0f..5ee04a5 100644
+--- a/arch/arm64/boot/dts/apple/t6030.dtsi
++++ b/arch/arm64/boot/dts/apple/t6030.dtsi
+@@ -1535,3 +1535,12 @@
+ 
+ #include "t6030-pmgr.dtsi"
+ #include "t6030-gpu.dtsi"
++
++/*
++ * Development-only, following the t6020.dtsi pattern: SoC string from chip
++ * ID 0x6030, family string from IOClass AGXAcceleratorG15X, base string from
++ * G15 variant S. No binding or driver in this tree accepts these strings.
++ */
++&gpu {
++	compatible = "apple,agx-t6030", "apple,agx-g15x", "apple,agx-g15s";
++};
